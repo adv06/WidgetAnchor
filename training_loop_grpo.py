@@ -11,19 +11,33 @@ from peft import LoraConfig, get_peft_model
 model_name = "Qwen/Qwen2.5-7B"
 
 tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+
+lora_config = LoraConfig(
+    r=16,
+    lora_alpha=32,
+    lora_dropout=0.05,
+    bias="none",
+    task_type="CAUSAL_LM",
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj"]
+)
+
 model = AutoModelForCausalLM.from_pretrained(
     model_name,
     torch_dtype="auto",
     device_map="auto"
 )
-
 frozen = copy.deepcopy(model) # for KL later
-old_model = copy.deepcopy(frozen) # store the old for policy updayes
+
+model.gradient_checkpointing_enable()
+model = get_peft_model(model,lora_config)
+
+old_model = copy.deepcopy(model) # store the old for policy updates
 for param in frozen.parameters():
     param.requires_grad = False # no grad update 
 
 for param in old_model.parameters():
-    old_model.requires_grad = False 
+    param.requires_grad = False
 
 n = 5
 training_steps = 1000
