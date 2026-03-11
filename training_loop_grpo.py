@@ -50,40 +50,47 @@ for i in range(training_steps):
     completion_scores = []
     inputs = tokenizer(prompts[i], return_tensors="pt").to(model.device)
     generations = []
-    for j in range(n):
-        with torch.no_grad():
-            output = model.generate(
-                **inputs,
-                max_new_tokens=500,
-                temperature=0.7,
-                do_sample=True,
-                return_dict_in_generate=True 
-            )
-        
-        prompt_len = inputs["input_ids"].shape[1] 
-        tokens = output.sequences[0]
-         
-        text = tokenizer.decode(tokens[prompt_len:], skip_special_tokens=True)
-        generations.append(tokens)
+    with torch.no_grad():
+        output = model.generate(
+            **inputs,
+            max_new_tokens=500,
+            temperature=0.7,
+            do_sample=True,
+            num_return_sequences=n,
+            return_dict_in_generate=True 
+        )
+    prompt_len = inputs["input_ids"].shape[1] # one prompt
+    
+    for seq in output.sequences:
+        text = tokenizer.decode(seq[prompt_len:], skip_special_tokens=True)
+        generations.append(seq)
         completion_scores.append(compute_reward_code(text, ground_truths[i]))
         
     completion_scores = torch.tensor(completion_scores, device=model.device)
     completion_reg = (completion_scores-completion_scores.mean())/(torch.std(completion_scores) + 1e-8)
     prompt_len = inputs["input_ids"].shape[1] # number of tokens in the prompt
     
-    losses = []
     beta = 0.05
-    for tokens, adv in zip(generations, completion_reg):
-        tokens = tokens.unsqueeze(0) # expects a batch input
+    
+    tokens = torch.nn.utils.rnn.pad_sequence(generations, batch_first=True, padding_value=tokenizer.pad_token_id) # batch generations
+    
+    with torch.amp.autocast("cuda", dtype=torch.bfloat16): 
+        outputs = model(tokens)
+        with torch.no_grad():
+            model.disable_adapter_layers()
+            outputs_ref = model(tokens) # lora is only added in the forward pass so we can disable and use it as the frozen model
+            model.enable_adapter_layers()
+            outputs_old = old_model(tokens)
+            
         
         completion_ids = tokens[:, prompt_len: ]
         eos_token_id = tokenizer.eos_token_id # eos token id
         is_eos = (completion_ids == eos_token_id) # boolean grid of true and false
         
-#         No, it gives a boolean tensor the same shape as completion_ids — True at every position where the token is EOS, False everywhere else.
+    #         No, it gives a boolean tensor the same shape as completion_ids — True at every position where the token is EOS, False everywhere else.
                                                                                                                                                                                                                                                                                                 
-#         # Example: completion_ids = [42, 15, EOS, 7, EOS]                                                                                                                                                                                                                                               
-#         # is_eos            =       [F,  F,  T,  F,  T ]   
+    #         # Example: completion_ids = [42, 15, EOS, 7, EOS]                                                                                                                                                                                                                                               
+    #         # is_eos            =       [F,  F,  T,  F,  T ]   
 
         eos_idx = torch.full((completion_ids.size(0),), completion_ids.size(1), device=tokens.device) # (batch,) fill each number completion_ids.size(1)
         
@@ -95,13 +102,7 @@ for i in range(training_steps):
         mask = (mask <= eos_idx.unsqueeze(1)).float() # get the stop column for each row, mask is broadcasted shape: (batch, seq_len)
         # tokens *= mask why is this wrong? Exercise for the reader
         
-        adv = adv.detach() # should not carry gradients
-        outputs = model(tokens)
-        with torch.no_grad():
-            model.disable_adapter_layers()
-            outputs_ref = model(tokens) # lora is only added in the forward pass so we can disable and use it as the frozen model
-            model.enable_adapter_layers()
-            outputs_old = old_model(tokens)
+        adv = completion_reg.detach().unsqueeze(1) # should not carry gradients, (n, 1) — broadcasts with (n, seq_len)
         
         logits = outputs.logits # batch, seq, tokens
         logits_ref = outputs_ref.logits
@@ -116,7 +117,7 @@ for i in range(training_steps):
         token_log_probs = selective_log_softmax(logits, targets)
         token_log_probs_ref = selective_log_softmax(logits_ref, targets)
         token_log_probs_old = selective_log_softmax(logits_old, targets)
-    
+
         completion_log_probs = token_log_probs[:, prompt_len-1: ] # get rid of prompt batch, tokens
         completion_log_probs_ref = token_log_probs_ref[:, prompt_len-1:] 
         completion_log_probs_old = token_log_probs_old[:, prompt_len-1:]
@@ -128,13 +129,9 @@ for i in range(training_steps):
         ratio = torch.exp(completion_log_probs - completion_log_probs_old)
         clipped = torch.clamp(ratio, 1-eps, 1+eps)
         per_token_loss = -torch.min(adv * ratio,  adv * clipped) + beta * KL
-        loss = (per_token_loss*mask).sum() / mask.sum() # average over real tokens
-        
-        losses.append(loss)
-    
-    loss = torch.stack(losses).mean() # preserve computation graph
+        loss = ((per_token_loss * mask).sum(dim=-1) / mask.sum(dim=-1)).mean()   # average per token across sequences
     optimizer.zero_grad()
-    loss.backward()
-    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    loss.backward()                                                                                                                                                                                                                                                                                              
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)                                                                                                                                                                                                                                                      
     optimizer.step()
     old_model.load_state_dict(model.state_dict()) # snapshot AFTER update, as a copy not a reference
