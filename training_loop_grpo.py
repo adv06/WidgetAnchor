@@ -7,6 +7,9 @@ from reward import compute_reward_code
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig, get_peft_model
 
+def selective_log_softmax(logits, targets):
+    log_probs = logits.log_softmax(dim=-1)
+    return log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
 
 model_name = "Qwen/Qwen2.5-7B"
 
@@ -110,13 +113,10 @@ for i in range(training_steps):
         logits_old = logits_old[:, :-1] 
         
         targets = tokens[:, 1:] # batch, token align the logits and targets, remember that logits has an extra dimension
-        log_probs = F.log_softmax(logits, dim=-1)    
-        log_probs_ref = F.log_softmax(logits_ref, dim=-1)
-        log_probs_old = F.log_softmax(logits_old, dim = -1)
         
-        token_log_probs = log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
-        token_log_probs_ref = log_probs_ref.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
-        token_log_probs_old = log_probs_old.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
+        token_log_probs = selective_log_softmax(logits, targets)
+        token_log_probs_ref = selective_log_softmax(logits_ref, targets)
+        token_log_probs_old = selective_log_softmax(logits_old, targets)
     
         completion_log_probs = token_log_probs[:, prompt_len-1: ] # get rid of prompt batch, tokens
         completion_log_probs_ref = token_log_probs_ref[:, prompt_len-1:] 
