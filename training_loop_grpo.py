@@ -75,6 +75,26 @@ for i in range(training_steps):
     beta = 0.05
     for tokens, adv in zip(generations, completion_reg):
         tokens = tokens.unsqueeze(0) # expects a batch input
+        
+        completion_ids = tokens[:, prompt_len: ]
+        eos_token_id = tokenizer.eos_token_id # eos token id
+        is_eos = (completion_ids == eos_token_id) # boolean grid of true and false
+        
+#         No, it gives a boolean tensor the same shape as completion_ids — True at every position where the token is EOS, False everywhere else.
+                                                                                                                                                                                                                                                                                                
+#         # Example: completion_ids = [42, 15, EOS, 7, EOS]                                                                                                                                                                                                                                               
+#         # is_eos            =       [F,  F,  T,  F,  T ]   
+
+        eos_idx = torch.full((completion_ids.size(0),), completion_ids.size(1), device=tokens.device) # (batch,) fill each number completion_ids.size(1)
+        
+        # stop at the first eof, update the size
+        if is_eos.any(): # check eos anywhere in the matrix
+            eos_idx[is_eos.any(dim=1)] = is_eos.argmax(dim=1)[is_eos.any(dim=1)] # think about this one, its tricky, lots of parallelize
+        
+        mask = torch.arange(completion_ids.size(1), device=tokens.device).unsqueeze(0)
+        mask = (mask <= eos_idx.unsqueeze(1)).float() # get the stop column for each row, mask is broadcasted shape: (batch, seq_len)
+        # tokens *= mask why is this wrong? Exercise for the reader
+        
         adv = adv.detach() # should not carry gradients
         outputs = model(tokens)
         with torch.no_grad():
@@ -85,9 +105,9 @@ for i in range(training_steps):
         logits_ref = outputs_ref.logits
         logits_old = outputs_old.logits
         
-        logits = logits[:, :-1]
-        logits_ref = logits_ref[:, :-1]
-        logits_old = logits_old[:, :-1]
+        logits = logits[:, :-1] 
+        logits_ref = logits_ref[:, :-1] 
+        logits_old = logits_old[:, :-1] 
         
         targets = tokens[:, 1:] # batch, token align the logits and targets, remember that logits has an extra dimension
         log_probs = F.log_softmax(logits, dim=-1)    
@@ -99,16 +119,17 @@ for i in range(training_steps):
         token_log_probs_old = log_probs_old.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
     
         completion_log_probs = token_log_probs[:, prompt_len-1: ] # get rid of prompt batch, tokens
-        completion_log_probs_ref = token_log_probs_ref[:, prompt_len-1: ] 
+        completion_log_probs_ref = token_log_probs_ref[:, prompt_len-1:] 
         completion_log_probs_old = token_log_probs_old[:, prompt_len-1:]
         
-        KL = (completion_log_probs_ref - completion_log_probs) # KL divergence
+        log_ratio = (completion_log_probs_ref - completion_log_probs) # KL divergence
+        KL = torch.exp(log_ratio) - log_ratio - 1  # schulman approximation, always non negative as opposed to the log_ration
         eps = 0.2
         
         ratio = torch.exp(completion_log_probs - completion_log_probs_old)
         clipped = torch.clamp(ratio, 1-eps, 1+eps)
         per_token_loss = -torch.min(adv * ratio,  adv * clipped) + beta * KL
-        loss = per_token_loss.mean()
+        loss = (per_token_loss*mask).sum() / mask.sum() # average over real tokens
         
         losses.append(loss)
     
