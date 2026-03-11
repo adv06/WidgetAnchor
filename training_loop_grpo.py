@@ -30,7 +30,7 @@ model = AutoModelForCausalLM.from_pretrained(
 frozen = copy.deepcopy(model) # for KL later
 
 model.gradient_checkpointing_enable()
-model = get_peft_model(model,lora_config)
+model = get_peft_model(model, lora_config)
 
 old_model = copy.deepcopy(model) # store the old for policy updates
 for param in frozen.parameters():
@@ -102,14 +102,13 @@ for i in range(training_steps):
         completion_log_probs_ref = token_log_probs_ref[:, prompt_len-1: ] 
         completion_log_probs_old = token_log_probs_old[:, prompt_len-1:]
         
-        KL = (completion_log_probs_ref - completion_log_probs).mean() # KL divergence
-        logprob_sum = completion_log_probs.sum() #  sum --> changed to mean so that longer sequences dont dominate
-        logprob_old_sum = completion_log_probs_old.sum()
-        
+        KL = (completion_log_probs_ref - completion_log_probs) # KL divergence
         eps = 0.2
         
-        ratio = torch.exp(logprob_sum - logprob_old_sum)
-        loss = -torch.min(adv * ratio,  adv * torch.clamp(ratio, 1 - eps, 1 + eps)) + beta * KL
+        ratio = torch.exp(completion_log_probs - completion_log_probs_old)
+        clipped = torch.clamp(ratio, 1-eps, 1+eps)
+        per_token_loss = -torch.min(adv * ratio,  adv * clipped) + beta * KL
+        loss = per_token_loss.mean()
         
         losses.append(loss)
     
