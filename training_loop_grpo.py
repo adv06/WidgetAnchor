@@ -30,14 +30,11 @@ model = AutoModelForCausalLM.from_pretrained(
     torch_dtype="auto",
     device_map="auto"
 )
-frozen = copy.deepcopy(model) # for KL later
 
 model.gradient_checkpointing_enable()
 model = get_peft_model(model, lora_config)
 
 old_model = copy.deepcopy(model) # store the old for policy updates
-for param in frozen.parameters():
-    param.requires_grad = False # no grad update 
 
 for param in old_model.parameters():
     param.requires_grad = False
@@ -101,7 +98,9 @@ for i in range(training_steps):
         adv = adv.detach() # should not carry gradients
         outputs = model(tokens)
         with torch.no_grad():
-            outputs_ref = frozen(tokens)
+            model.disable_adapter_layers()
+            outputs_ref = model(tokens) # lora is only added in the forward pass so we can disable and use it as the frozen model
+            model.enable_adapter_layers()
             outputs_old = old_model(tokens)
         
         logits = outputs.logits # batch, seq, tokens
