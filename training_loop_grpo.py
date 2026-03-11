@@ -45,6 +45,7 @@ prompts = [] # training steps prompts
 ground_truths = []
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.01)
+grad_accum_steps = 4
 
 for i in range(training_steps):
     completion_scores = []
@@ -130,8 +131,12 @@ for i in range(training_steps):
         clipped = torch.clamp(ratio, 1-eps, 1+eps)
         per_token_loss = -torch.min(adv * ratio,  adv * clipped) + beta * KL
         loss = ((per_token_loss * mask).sum(dim=-1) / mask.sum(dim=-1)).mean()   # average per token across sequences
-    optimizer.zero_grad()
-    loss.backward()                                                                                                                                                                                                                                                                                              
-    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)                                                                                                                                                                                                                                                      
-    optimizer.step()
-    old_model.load_state_dict(model.state_dict()) # snapshot AFTER update, as a copy not a reference
+        
+    loss = loss / grad_accum_steps # do the math bro --> need to scale it down --> (a+b+c)/n + (d+e+f)/n = (a+b+c+d+e+f)/n but we want (a+b+c+d+e+f)/(2*n) look at the loss --> grad accumulation step
+    loss.backward()
+    
+    if (i+1) % grad_accum_steps == 0:                                                                                                                                                                                                                                                                                               
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)                                                                                                                                                                                                                                                      
+        optimizer.step()
+        optimizer.zero_grad()
+        old_model.load_state_dict(model.state_dict()) # snapshot AFTER update, as a copy not a reference
