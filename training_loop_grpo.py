@@ -1,11 +1,12 @@
-import torch 
-import torch.nn.functional as F 
+import torch
+import torch.nn.functional as F
 import torch.nn as nn
 import copy
 from reward import compute_reward_code
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig, get_peft_model
+from vllm import LLM, SamplingParams
 
 def selective_log_softmax(logits, targets):
     log_probs = logits.log_softmax(dim=-1)
@@ -27,17 +28,24 @@ lora_config = LoraConfig(
 
 model = AutoModelForCausalLM.from_pretrained(
     model_name,
+    attn_implementation="flash_attention_2",
     torch_dtype="auto",
     device_map="auto"
 )
 
 model.gradient_checkpointing_enable()
 model = get_peft_model(model, lora_config)
+model = torch.compile(model) # what this does is instead of executing operations seperately and storing in memory, it does a lot of operations at once and stores it a all in memory
 
 old_model = copy.deepcopy(model) # store the old for policy updates
 
 for param in old_model.parameters():
     param.requires_grad = False
+
+# vLLM engine for fast generation — uses PagedAttention, continuous batching, optimized CUDA kernels
+# runs on a separate GPU (or same GPU in colocate mode)
+llm = LLM(model=model_name, tensor_parallel_size=1)
+sampling_params = SamplingParams(temperature=0.7, max_tokens=500, n=5)
 
 n = 5
 training_steps = 1000
@@ -49,27 +57,22 @@ grad_accum_steps = 4
 
 for i in range(training_steps):
     completion_scores = []
-    inputs = tokenizer(prompts[i], return_tensors="pt").to(model.device)
     generations = []
-    with torch.no_grad():
-        output = model.generate(
-            **inputs,
-            max_new_tokens=500,
-            temperature=0.7,
-            do_sample=True,
-            num_return_sequences=n,
-            return_dict_in_generate=True 
-        )
-    prompt_len = inputs["input_ids"].shape[1] # one prompt
-    
-    for seq in output.sequences:
-        text = tokenizer.decode(seq[prompt_len:], skip_special_tokens=True)
-        generations.append(seq)
+
+    # vLLM generation, much faster than model.generate()
+    vllm_outputs = llm.generate([prompts[i]], sampling_params)
+    prompt_len = len(vllm_outputs[0].prompt_token_ids)
+
+    for completion in vllm_outputs[0].outputs:
+        text = completion.text
+        # reconstruct full token sequence (prompt + completion) for HF model forward pass
+        full_ids = vllm_outputs[0].prompt_token_ids + list(completion.token_ids)
+        generations.append(torch.tensor(full_ids, device=model.device))
         completion_scores.append(compute_reward_code(text, ground_truths[i]))
         
     completion_scores = torch.tensor(completion_scores, device=model.device)
     completion_reg = (completion_scores-completion_scores.mean())/(torch.std(completion_scores) + 1e-8)
-    prompt_len = inputs["input_ids"].shape[1] # number of tokens in the prompt
+    # prompt_len already set from vllm_outputs on line 64
     
     beta = 0.05
     
@@ -140,3 +143,5 @@ for i in range(training_steps):
         optimizer.step()
         optimizer.zero_grad()
         old_model.load_state_dict(model.state_dict()) # snapshot AFTER update, as a copy not a reference
+        # sync updated weights to vLLM so it generates from current policy
+        llm.llm_engine.model_executor.driver_worker.model_runner.model.load_weights(model.state_dict())
