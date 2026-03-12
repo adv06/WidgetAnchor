@@ -86,13 +86,15 @@ for i in range(training_steps):
     
     tokens = torch.nn.utils.rnn.pad_sequence(generations, batch_first=True, padding_value=tokenizer.pad_token_id) # batch generations
     
-    with torch.amp.autocast("cuda", dtype=torch.bfloat16): 
-        outputs = model(tokens)
+    attention_mask = (tokens != PAD_TOKEN_ID).long() # 1 for real tokens, 0 for fake padding (my homies hate padding)
+
+    with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+        outputs = model(tokens, attention_mask=attention_mask)
         with torch.no_grad():
             model.disable_adapter_layers()
-            outputs_ref = model(tokens) # lora is only added in the forward pass so we can disable and use it as the frozen model
+            outputs_ref = model(tokens, attention_mask=attention_mask)
             model.enable_adapter_layers()
-            outputs_old = old_model(tokens)
+            outputs_old = old_model(tokens, attention_mask=attention_mask)
             
         
         # build mask from actual completion lengths (not EOS search, since pad_token == eos_token)
@@ -142,7 +144,7 @@ for i in range(training_steps):
         # sync updated weights to vLLM — merge LoRA into base weights temporarily
         # merge_and_unload() is destructive (can't train after), so use merge/unmerge instead
         model.merge_adapter()  # folds lora_A @ lora_B into base weights
-        llm.llm_engine.model_executor.driver_worker.model_runner.model.load_weights(model.state_dict())
+        llm.llm_engine.model_executor.driver_worker.model_runner.model.load_weights(model.state_dict()) # merge LoRA into base 
         model.unmerge_adapter()  # restores base weights + separate LoRA for continued training
 
     if (i+1) % 10 == 0:
