@@ -15,7 +15,7 @@ def selective_log_softmax(logits, targets):
 model_name = "Qwen/Qwen2.5-7B"
 
 tokenizer = AutoTokenizer.from_pretrained(model_name)
-
+tokenizer.pad_token = tokenizer.eos_token
 
 lora_config = LoraConfig(
     r=16,
@@ -100,7 +100,7 @@ for i in range(training_steps):
         
         # stop at the first eof, update the size
         if is_eos.any(): # check eos anywhere in the matrix
-            eos_idx[is_eos.any(dim=1)] = is_eos.argmax(dim=1)[is_eos.any(dim=1)] # think about this one, its tricky, lots of parallelize
+            eos_idx[is_eos.any(dim=1)] = is_eos.int().argmax(dim=1)[is_eos.any(dim=1)] # think about this one, its tricky, lots of parallelize
         
         mask = torch.arange(completion_ids.size(1), device=tokens.device).unsqueeze(0)
         mask = (mask <= eos_idx.unsqueeze(1)).float() # get the stop column for each row, mask is broadcasted shape: (batch, seq_len)
@@ -133,7 +133,7 @@ for i in range(training_steps):
         ratio = torch.exp(completion_log_probs - completion_log_probs_old)
         clipped = torch.clamp(ratio, 1-eps, 1+eps)
         per_token_loss = -torch.min(adv * ratio,  adv * clipped) + beta * KL
-        loss = ((per_token_loss * mask).sum(dim=-1) / mask.sum(dim=-1)).mean()   # average per token across sequences
+        loss = ((per_token_loss * mask).sum(dim=-1) / mask.sum(dim=-1).clamp(min=1)).mean()   # average per token across sequences
         
     loss = loss / grad_accum_steps # do the math bro --> need to scale it down --> (a+b+c)/n + (d+e+f)/n = (a+b+c+d+e+f)/n but we want (a+b+c+d+e+f)/(2*n) look at the loss --> grad accumulation step
     loss.backward()
@@ -143,5 +143,8 @@ for i in range(training_steps):
         optimizer.step()
         optimizer.zero_grad()
         old_model.load_state_dict(model.state_dict()) # snapshot AFTER update, as a copy not a reference
-        # sync updated weights to vLLM so it generates from current policy
+        # sync updated weights to vLLM — merge LoRA into base weights temporarily
+        # merge_and_unload() is destructive (can't train after), so use merge/unmerge instead
+        model.merge_adapter()  # folds lora_A @ lora_B into base weights
         llm.llm_engine.model_executor.driver_worker.model_runner.model.load_weights(model.state_dict())
+        model.unmerge_adapter()  # restores base weights + separate LoRA for continued training
