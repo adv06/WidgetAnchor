@@ -16,6 +16,8 @@ model_name = "Qwen/Qwen2.5-7B"
 
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 tokenizer.pad_token = tokenizer.eos_token
+PAD_TOKEN_ID = tokenizer.pad_token_id
+device = torch.device("cuda:0")
 
 lora_config = LoraConfig(
     r=16,
@@ -60,23 +62,25 @@ for i in range(training_steps):
     completion_scores = []
     generations = []
 
-    # vLLM generation, much faster than model.generate()
     vllm_outputs = llm.generate([prompts[i]], sampling_params)
     prompt_len = len(vllm_outputs[0].prompt_token_ids)
 
+    completion_lengths = [] # track actual completion lengths since pad_token == eos_token
     for completion in vllm_outputs[0].outputs:
         text = completion.text
-        # reconstruct full token sequence (prompt + completion) for HF model forward pass
+       
         full_ids = vllm_outputs[0].prompt_token_ids + list(completion.token_ids)
-        generations.append(torch.tensor(full_ids, device=model.device))
+        generations.append(torch.tensor(full_ids, device=device))
+        completion_lengths.append(len(completion.token_ids))
         completion_scores.append(compute_reward_code(text, ground_truths[i]))
         
-    completion_scores = torch.tensor(completion_scores, device=model.device)
-    # skip update if all generations scored the same — std=0 makes advantages explode
-    if torch.std(completion_scores) < 1e-6:
-        continue
-    completion_reg = (completion_scores-completion_scores.mean())/(torch.std(completion_scores) + 1e-8)
-    # prompt_len already set from vllm_outputs on line 64
+    completion_scores = torch.tensor(completion_scores, device=device)
+    # if all generations scored the same, std=0 makes advantages explode, zero out advantages instead of skipping
+    reward_std = torch.std(completion_scores)
+    if reward_std < 1e-6:
+        completion_reg = torch.zeros_like(completion_scores)
+    else:
+        completion_reg = (completion_scores-completion_scores.mean())/(reward_std + 1e-8)
     
     beta = 0.05
     
@@ -91,24 +95,11 @@ for i in range(training_steps):
             outputs_old = old_model(tokens)
             
         
-        completion_ids = tokens[:, prompt_len: ]
-        eos_token_id = tokenizer.eos_token_id # eos token id
-        is_eos = (completion_ids == eos_token_id) # boolean grid of true and false
-        
-    #         No, it gives a boolean tensor the same shape as completion_ids — True at every position where the token is EOS, False everywhere else.
-                                                                                                                                                                                                                                                                                                
-    #         # Example: completion_ids = [42, 15, EOS, 7, EOS]                                                                                                                                                                                                                                               
-    #         # is_eos            =       [F,  F,  T,  F,  T ]   
-
-        eos_idx = torch.full((completion_ids.size(0),), completion_ids.size(1), device=tokens.device) # (batch,) fill each number completion_ids.size(1)
-        
-        # stop at the first eof, update the size
-        if is_eos.any(): # check eos anywhere in the matrix
-            eos_idx[is_eos.any(dim=1)] = is_eos.int().argmax(dim=1)[is_eos.any(dim=1)] # think about this one, its tricky, lots of parallelize
-        
-        mask = torch.arange(completion_ids.size(1), device=tokens.device).unsqueeze(0)
-        mask = (mask <= eos_idx.unsqueeze(1)).float() # get the stop column for each row, mask is broadcasted shape: (batch, seq_len)
-        # tokens *= mask why is this wrong? Exercise for the reader
+        # build mask from actual completion lengths (not EOS search, since pad_token == eos_token)
+        completion_ids = tokens[:, prompt_len:] # completion_lengths gives the real length so we chillin no need to calc eos
+        comp_lens = torch.tensor(completion_lengths, device=device) # (n,)
+        seq_indices = torch.arange(completion_ids.size(1), device=device).unsqueeze(0) # (1, max_comp_len), crazy broadcast look at next line
+        mask = (seq_indices < comp_lens.unsqueeze(1)).float() # (n, max_comp_len), 1 for real tokens, 0 for padding
         
         adv = completion_reg.detach().unsqueeze(1) # should not carry gradients, (n, 1) — broadcasts with (n, seq_len)
         
@@ -156,3 +147,7 @@ for i in range(training_steps):
 
     if (i+1) % 10 == 0:
         print(f"step {i+1} | loss: {loss.item():.4f} | mean_reward: {completion_scores.mean().item():.4f} | KL: {KL.mean().item():.4f} | lr: {scheduler.get_last_lr()[0]:.6f}")
+
+    if (i+1) % 200 == 0:
+        model.save_pretrained(f"./grpo_checkpoint_step_{i+1}")
+        print(f"checkpoint saved at step {i+1}")
