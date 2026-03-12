@@ -4,7 +4,7 @@ import torch.nn as nn
 import copy
 from reward import compute_reward_code
 
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, get_cosine_schedule_with_warmup
 from peft import LoraConfig, get_peft_model
 from vllm import LLM, SamplingParams
 
@@ -53,6 +53,7 @@ prompts = [] # training steps prompts
 ground_truths = []
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.01)
+scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=100, num_training_steps=training_steps)
 grad_accum_steps = 4
 
 for i in range(training_steps):
@@ -71,6 +72,9 @@ for i in range(training_steps):
         completion_scores.append(compute_reward_code(text, ground_truths[i]))
         
     completion_scores = torch.tensor(completion_scores, device=model.device)
+    # skip update if all generations scored the same — std=0 makes advantages explode
+    if torch.std(completion_scores) < 1e-6:
+        continue
     completion_reg = (completion_scores-completion_scores.mean())/(torch.std(completion_scores) + 1e-8)
     # prompt_len already set from vllm_outputs on line 64
     
@@ -142,9 +146,13 @@ for i in range(training_steps):
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)                                                                                                                                                                                                                                                      
         optimizer.step()
         optimizer.zero_grad()
+        scheduler.step()
         old_model.load_state_dict(model.state_dict()) # snapshot AFTER update, as a copy not a reference
         # sync updated weights to vLLM — merge LoRA into base weights temporarily
         # merge_and_unload() is destructive (can't train after), so use merge/unmerge instead
         model.merge_adapter()  # folds lora_A @ lora_B into base weights
         llm.llm_engine.model_executor.driver_worker.model_runner.model.load_weights(model.state_dict())
         model.unmerge_adapter()  # restores base weights + separate LoRA for continued training
+
+    if (i+1) % 10 == 0:
+        print(f"step {i+1} | loss: {loss.item():.4f} | mean_reward: {completion_scores.mean().item():.4f} | KL: {KL.mean().item():.4f} | lr: {scheduler.get_last_lr()[0]:.6f}")
