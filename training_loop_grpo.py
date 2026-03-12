@@ -72,7 +72,7 @@ for i in range(training_steps):
         full_ids = vllm_outputs[0].prompt_token_ids + list(completion.token_ids)
         generations.append(torch.tensor(full_ids, device=device))
         completion_lengths.append(len(completion.token_ids))
-        completion_scores.append(compute_reward_code(text, ground_truths[i]))
+        completion_scores.append(compute_reward_code(ground_truths[i], text)) # ground_truths[i] is target image bytes, text is generated HTML
         
     completion_scores = torch.tensor(completion_scores, device=device)
     # if all generations scored the same, std=0 makes advantages explode, zero out advantages instead of skipping

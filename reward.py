@@ -101,16 +101,15 @@ def compute_vllm_validity(ref_image: bytes, base_image: bytes) -> float:
         score = float(match.group()) if match else 0.0
     return max(0.0, min(1.0, score))
     
-def compute_reward_code(ref_code, base_code, ssim_weight=0.5, validity_weight=0.2, vlm_weight=0.3):
-    validity = compute_html_validity(base_code)
+def compute_reward_code(target_image: bytes, generated_html: str, ssim_weight=0.5, validity_weight=0.2, vlm_weight=0.3):
+    validity = compute_html_validity(generated_html)
 
     ssim_score = 0.0
     vlm_score = 0.0
     try:
-        ref_image = render_html_to_image(ref_code)
-        base_image = render_html_to_image(base_code)
-        ssim_score = compute_reward_image(ref_image, base_image)
-        vlm_score = compute_vllm_validity(ref_image, base_image)
+        rendered_image = render_html_to_image(generated_html)
+        ssim_score = compute_reward_image(target_image, rendered_image)
+        vlm_score = compute_vllm_validity(target_image, rendered_image)
     except Exception:
         pass
 
