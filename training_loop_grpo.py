@@ -124,7 +124,7 @@ for i in range(training_steps):
         completion_log_probs_old = token_log_probs_old[:, prompt_len-1:]
         
         log_ratio = (completion_log_probs_ref - completion_log_probs) # KL divergence
-        KL = torch.exp(log_ratio) - log_ratio - 1  # schulman approximation, always non negative as opposed to the log_ration
+        KL = torch.exp(log_ratio) - log_ratio - 1  # schulman approximation, always non negative as opposed to the log_ratio
         eps = 0.2
         
         ratio = torch.exp(completion_log_probs - completion_log_probs_old)
