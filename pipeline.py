@@ -1,16 +1,24 @@
 import json
+import os
 import torch
+from dotenv import load_dotenv
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig, get_peft_model
 from sft import run_sft
 from training_loop_grpo import run_grpo
 
+load_dotenv()
+
 # ============================================================
 # Config
 # ============================================================
-model_name = "Qwen/Qwen2.5-7B"
+model_name = "Qwen/Qwen2.5-1.5B"
 data_dir = "./data"
+save_dir = "/shared/advey"
 device = torch.device("cuda:0")
+
+os.makedirs(f"{save_dir}/checkpoints", exist_ok=True)
+os.makedirs(f"{save_dir}/plots", exist_ok=True)
 
 # ============================================================
 # Load data
@@ -60,8 +68,8 @@ print("=" * 60)
 print("Phase 1: Supervised Fine-Tuning")
 print("=" * 60)
 
-model = run_sft(model, tokenizer, sft_prompts, sft_code_gt, training_steps=500, lr=1e-4, device=device)
-model.save_pretrained("./checkpoints/sft_final")
+model = run_sft(model, tokenizer, sft_prompts, sft_code_gt, training_steps=500, lr=1e-4, save_dir=save_dir, device=device)
+model.save_pretrained(f"{save_dir}/checkpoints/sft_final")
 print("SFT complete.\n")
 
 # ============================================================
@@ -72,6 +80,6 @@ print("Phase 2: GRPO Reinforcement Learning")
 print("=" * 60)
 
 model = run_grpo(model, tokenizer, grpo_prompts, grpo_targets, model_name=model_name,
-                 training_steps=1000, lr=1e-5, device=device)
-model.save_pretrained("./checkpoints/grpo_final")
+                 training_steps=1000, lr=1e-5, save_dir=save_dir, device=device)
+model.save_pretrained(f"{save_dir}/checkpoints/grpo_final")
 print("GRPO complete. Final model saved.")

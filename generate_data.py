@@ -1,8 +1,11 @@
 import json
 import os
 import random
+from dotenv import load_dotenv
 from openai import OpenAI
 from reward import render_html_to_image
+
+load_dotenv()
 
 client = OpenAI()
 

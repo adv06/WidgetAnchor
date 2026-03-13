@@ -5,11 +5,8 @@ from peft import PeftModel
 
 app = Flask(__name__)
 
-# ============================================================
-# Load model
-# ============================================================
-model_name = "Qwen/Qwen2.5-7B"
-checkpoint_path = "./checkpoints/grpo_final"
+model_name = "Qwen/Qwen2.5-1.5B"
+checkpoint_path = "/shared/advey/checkpoints/grpo_final"
 
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 tokenizer.pad_token = tokenizer.eos_token
@@ -22,9 +19,6 @@ model = AutoModelForCausalLM.from_pretrained(
 model = PeftModel.from_pretrained(model, checkpoint_path)
 model.eval()
 
-# ============================================================
-# HTML template
-# ============================================================
 TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -70,9 +64,6 @@ TEMPLATE = """
 </html>
 """
 
-# ============================================================
-# Routes
-# ============================================================
 @app.route("/", methods=["GET", "POST"])
 def index():
     html_output = None

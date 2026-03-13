@@ -1,4 +1,4 @@
-# WidgetAnchor
+# WidgetAnchor V1
 
 Train a language model to generate HTML/CSS widgets from natural language descriptions using SFT + GRPO reinforcement learning.
 

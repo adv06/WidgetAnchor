@@ -3,12 +3,23 @@ import torch.nn as nn
 import tempfile
 import os
 from openai import OpenAI
-import base64 
+import base64
 
 from skimage.metrics import structural_similarity as ssim
 from playwright.sync_api import sync_playwright
 import cv2
-import numpy as np 
+import numpy as np
+
+# keep browser alive across calls — launching chromium is ~1-2s per call
+_playwright_instance = None
+_browser = None
+
+def _get_browser():
+    global _playwright_instance, _browser
+    if _browser is None:
+        _playwright_instance = sync_playwright().start()
+        _browser = _playwright_instance.chromium.launch(headless=True)
+    return _browser
 
 
 def render_html_to_image(html_code: str, width=800, height=600) -> bytes:
@@ -17,14 +28,13 @@ def render_html_to_image(html_code: str, width=800, height=600) -> bytes:
         tmp_path = f.name
 
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page(viewport={"width": width, "height": height})
-            page.goto(f"file:///{tmp_path}")
-            page.wait_for_load_state("networkidle")
-            png_bytes = page.screenshot()
-            browser.close()
-            return png_bytes
+        browser = _get_browser()
+        page = browser.new_page(viewport={"width": width, "height": height})
+        page.goto(f"file:///{tmp_path}")
+        page.wait_for_load_state("networkidle")
+        png_bytes = page.screenshot()
+        page.close()
+        return png_bytes
     finally:
         os.unlink(tmp_path)
 
@@ -100,18 +110,47 @@ def compute_vllm_validity(ref_image: bytes, base_image: bytes) -> float:
         match = re.search(r"\d+\.?\d*", score_text)
         score = float(match.group()) if match else 0.0
     return max(0.0, min(1.0, score))
-    
-def compute_reward_code(target_image: bytes, generated_html: str, ssim_weight=0.5, validity_weight=0.2, vlm_weight=0.3):
+
+_clip_model = None
+_clip_processor = None
+
+def _get_clip():
+    global _clip_model, _clip_processor
+    if _clip_model is None:
+        from transformers import CLIPProcessor, CLIPModel
+        _clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+        _clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+    return _clip_model, _clip_processor
+
+
+def compute_clip_similarity(ref_image: bytes, gen_image: bytes) -> float:
+    from PIL import Image
+    import io
+
+    model, processor = _get_clip()
+
+    img1 = Image.open(io.BytesIO(ref_image)).convert("RGB")
+    img2 = Image.open(io.BytesIO(gen_image)).convert("RGB")
+
+    inputs = processor(images=[img1, img2], return_tensors="pt", padding=True)
+    with torch.no_grad():
+        features = model.get_image_features(**inputs)
+    features = features / features.norm(dim=-1, keepdim=True)
+    similarity = (features[0] @ features[1]).item()
+    return max(0.0, similarity) # cosine similarity, clamp negative
+
+
+def compute_reward_code(target_image: bytes, generated_html: str, ssim_weight=0.5, validity_weight=0.2, clip_weight=0.3):
+    """Reward = SSIM + validity + CLIP (no VLM — too slow for training, 25k GPT-4o calls)"""
     validity = compute_html_validity(generated_html)
 
     ssim_score = 0.0
-    vlm_score = 0.0
+    clip_score = 0.0
     try:
         rendered_image = render_html_to_image(generated_html)
         ssim_score = compute_reward_image(target_image, rendered_image)
-        vlm_score = compute_vllm_validity(target_image, rendered_image)
+        clip_score = compute_clip_similarity(target_image, rendered_image)
     except Exception:
         pass
 
-    return ssim_weight * ssim_score + validity_weight * validity + vlm_weight * vlm_score
-
+    return ssim_weight * ssim_score + validity_weight * validity + clip_weight * clip_score
