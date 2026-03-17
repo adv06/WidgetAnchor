@@ -29,7 +29,7 @@ def main():
 
     # load base model + SFT LoRA checkpoint
     base_model = AutoModelForCausalLM.from_pretrained(
-        model_name, attn_implementation="sdpa", torch_dtype="auto", device_map="auto"
+        model_name, attn_implementation="sdpa", dtype="auto", device_map={"": "cuda:0"}
     )
     model = PeftModel.from_pretrained(base_model, f"{save_dir}/checkpoints/sft_final", is_trainable=True)
     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
@@ -39,7 +39,7 @@ def main():
     print("=" * 60)
 
     model = run_grpo(model, tokenizer, grpo_prompts, grpo_targets, model_name=model_name,
-                     training_steps=1000, lr=1e-5, n=3, batch_size=2, num_epochs=4,
+                     training_steps=1000, lr=5e-6, n=3, batch_size=2, num_epochs=2,
                      save_dir=save_dir, device=device)
     model.save_pretrained(f"{save_dir}/checkpoints/grpo_final")
     print("GRPO complete. Final model saved.")

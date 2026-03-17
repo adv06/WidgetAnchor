@@ -62,9 +62,7 @@ def main():
     model = get_peft_model(model, lora_config)
     # torch.compile removed — breaks PEFT adapter toggling in GRPO loop
 
-    # ============================================================
-    # Phase 1: SFT
-    # ============================================================
+    # sft
     print("=" * 60)
     print("Phase 1: Supervised Fine-Tuning")
     print("=" * 60)
@@ -73,9 +71,7 @@ def main():
     model.save_pretrained(f"{save_dir}/checkpoints/sft_final")
     print("SFT complete.\n")
 
-    # ============================================================
-    # Phase 2: GRPO
-    # ============================================================
+    # grpo
     print("=" * 60)
     print("Phase 2: GRPO Reinforcement Learning")
     print("=" * 60)
