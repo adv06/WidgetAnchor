@@ -118,7 +118,7 @@ def _get_clip():
     global _clip_model, _clip_processor
     if _clip_model is None:
         from transformers import CLIPProcessor, CLIPModel
-        _clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+        _clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")  # keep on CPU — SIGFPE on GPU
         _clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
     return _clip_model, _clip_processor
 
@@ -133,6 +133,7 @@ def compute_clip_similarity(ref_image: bytes, gen_image: bytes) -> float:
     img2 = Image.open(io.BytesIO(gen_image)).convert("RGB")
 
     inputs = processor(images=[img1, img2], return_tensors="pt", padding=True)
+    # inputs stay on CPU — CLIP triggers SIGFPE on this GPU
     with torch.no_grad():
         features = model.get_image_features(**inputs)
     features = features / features.norm(dim=-1, keepdim=True)

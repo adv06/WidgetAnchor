@@ -15,7 +15,7 @@ def run_sft(model, tokenizer, prompts, code_gt, training_steps=1000, lr=1e-4, sa
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=100, num_training_steps=training_steps)
 
     for i in range(training_steps):
-        tokenized_gt = tokenizer(prompts[i % len(prompts)] + code_gt[i % len(code_gt)], return_tensors="pt").to(device)
+        tokenized_gt = tokenizer(prompts[i % len(prompts)] + code_gt[i % len(code_gt)] + tokenizer.eos_token, return_tensors="pt").to(device)
         prompt_len = len(tokenizer.encode(prompts[i % len(prompts)]))
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             logits = model(**tokenized_gt).logits[:, prompt_len-1:-1, :]

@@ -107,4 +107,4 @@ def generate_dataset(num_samples=200, output_dir="./data"):
 
 
 if __name__ == "__main__":
-    generate_dataset(num_samples=200)
+    generate_dataset(num_samples=500)
