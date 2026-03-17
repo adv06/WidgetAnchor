@@ -14,17 +14,23 @@ def selective_log_softmax(logits, targets):
 
 
 def run_grpo(model, tokenizer, prompts, ground_truths, model_name="Qwen/Qwen2.5-1.5B",
-             training_steps=1000, lr=1e-5, n=5, batch_size=4, grad_accum_steps=4, beta=0.05, eps=0.2,
+             training_steps=1000, lr=1e-5, n=5, batch_size=4,beta=0.05, eps=0.2,
              save_dir="/shared/advey", device=torch.device("cuda:0"), num_epochs=4):
 
     sft_state = deepcopy(model.peft_config["default"])
     model.add_adapter("reference", sft_state)
     ref_weights = {k: v.clone() for k, v in model.get_adapter_state_dict("default").items()} # get the sft weights
     set_peft_model_state_dict(model, ref_weights, adapter_name="reference") # clone into reference that wont be touched by optimizer
-    
+
+    # freeze reference adapter so optimizer doesn't update it
+    for name, param in model.named_parameters():
+        if "reference" in name:
+            param.requires_grad = False
+    model.set_adapter("default")  # make sure default is active
+
     PAD_TOKEN_ID = tokenizer.pad_token_id
-    
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
+
+    optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=lr, weight_decay=0.01)
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=100, num_training_steps=training_steps * num_epochs)
     history = {"loss": [], "reward": [], "kl": [], "clip_frac": []}
     for i in range(training_steps):
