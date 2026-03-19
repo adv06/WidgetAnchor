@@ -4,8 +4,8 @@ import torch
 from dotenv import load_dotenv
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig, get_peft_model
-from sft import run_sft
-from training_loop_grpo import run_grpo
+from training.sft import run_sft, SYSTEM_PROMPT
+from training.training_loop_grpo import run_grpo
 
 def main():
     load_dotenv()
@@ -14,7 +14,7 @@ def main():
     # Config
     # ============================================================
     model_name = "Qwen/Qwen2.5-1.5B"
-    data_dir = "./data"
+    data_dir = "./output/final"
     save_dir = "/shared/advey"
     device = torch.device("cuda:0")
 
@@ -27,14 +27,15 @@ def main():
     with open(f"{data_dir}/train.json") as f:
         train_data = json.load(f)
 
-    sft_prompts = [s["prompt"] for s in train_data]
-    sft_code_gt = [s["react_code"] for s in train_data]
-    grpo_prompts = [s["prompt"] for s in train_data]
+    # SFT: input is system prompt + task, target is CoT + code
+    sft_prompts = [SYSTEM_PROMPT + "\nRecreate the widget shown in the reference image." for _ in train_data]
+    sft_targets = [s["cot"] for s in train_data]
 
-    # load target images for GRPO reward
+    # GRPO: same prompts, targets are reference screenshot bytes for reward
+    grpo_prompts = sft_prompts
     grpo_targets = []
     for sample in train_data:
-        with open(sample["image_path"], "rb") as f:
+        with open(sample["screenshot_path"], "rb") as f:
             grpo_targets.append(f.read())
 
     # ============================================================
@@ -60,18 +61,17 @@ def main():
     )
     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     model = get_peft_model(model, lora_config)
-    # torch.compile removed — breaks PEFT adapter toggling in GRPO loop
 
-    # sft
+    # SFT
     print("=" * 60)
     print("Phase 1: Supervised Fine-Tuning")
     print("=" * 60)
 
-    model = run_sft(model, tokenizer, sft_prompts, sft_code_gt, training_steps=500, lr=1e-4, save_dir=save_dir, device=device)
+    model = run_sft(model, tokenizer, sft_prompts, sft_targets, training_steps=500, lr=1e-4, save_dir=save_dir, device=device)
     model.save_pretrained(f"{save_dir}/checkpoints/sft_final")
     print("SFT complete.\n")
 
-    # grpo
+    # GRPO
     print("=" * 60)
     print("Phase 2: GRPO Reinforcement Learning")
     print("=" * 60)

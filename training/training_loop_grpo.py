@@ -2,11 +2,14 @@ import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import os
+import re
 from reward.programmatic import compute_reward_code
 from einops import rearrange
 from peft import set_peft_model_state_dict, get_peft_model_state_dict
 from copy import deepcopy
 from transformers import get_cosine_schedule_with_warmup
+from reward.programmatic import render_html_to_image
+from reward.round_robin import round_robin_scoring
 
 def selective_log_softmax(logits, targets):
     log_probs = logits.log_softmax(dim=-1)
@@ -52,6 +55,7 @@ def run_grpo(model, tokenizer, prompts, ground_truths, model_name="Qwen/Qwen2.5-
             prompt_lengths.extend([prompt_len] * n)
             with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.bfloat16):
                 gen_out = model.generate(prompt_ids, output_logits=True, return_dict_in_generate=True, temperature=0.7, do_sample=True, max_new_tokens=1024, pad_token_id=PAD_TOKEN_ID, num_return_sequences=n)
+            candidate_images = []
             for j in range(n):
                 # reconstruct full token sequence (prompt + completion) for HF model forward pass
                 full_ids = gen_out.sequences[j]
@@ -59,10 +63,18 @@ def run_grpo(model, tokenizer, prompts, ground_truths, model_name="Qwen/Qwen2.5-
                 completion_length = len(completion_ids)
                 completion_lengths.append(completion_length)
                 text = tokenizer.decode(completion_ids, skip_special_tokens=True)
-                score = compute_reward_code(ground_truths[idxs[b]], text) # ground_truths[idx] is target image bytes, text is generated React code
-                raw_scores.append(score)
-                completion_interim.append(score)
+                code_match = re.search(r"<code>(.*?)</code>", text, re.DOTALL)
+                if code_match:
+                    html = code_match.group(1)
+                    candidate_images.append((render_html_to_image(html), html))
+                else:
+                    candidate_images.append((None, text))
+                # score = compute_reward_code(ground_truths[idxs[b]], text) # ground_truths[idx] is target image bytes, text is generated React code
+                # raw_scores.append(score)
+                # completion_interim.append(score)
                 generations.append(full_ids.clone())
+            completion_interim = round_robin_scoring(ground_truths[idxs[b]], candidate_images)
+            raw_scores.extend(completion_interim)
             # normalize advantages within this prompt's group
             group = torch.tensor(completion_interim, device=device)
             reward_std = group.std()
@@ -131,7 +143,7 @@ def run_grpo(model, tokenizer, prompts, ground_truths, model_name="Qwen/Qwen2.5-
 
                 ratio = torch.exp(completion_log_probs - old_probs_aligned)
                 clipped = torch.clamp(ratio, 1 - eps, 1 + eps)
-                # clip fraction: how often the ratio was clipped — if too high, policy is changing too fast
+                # clip fraction: how often the ratio was clipped, if too high, policy is changing too fast
                 clip_frac = ((ratio - 1).abs() > eps).float().mean().item()
                 per_token_loss = -torch.min(adv * ratio, adv * clipped) + beta * KL
                 loss = ((per_token_loss * mask).sum(dim=-1) / mask.sum(dim=-1).clamp(min=1)).mean() # average per token across sequences
