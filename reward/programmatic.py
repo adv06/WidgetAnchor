@@ -85,39 +85,6 @@ def compute_html_validity(html_code: str) -> float:
     unclosed = len(tags_opened)
     return max(0.0, 1.0 - (unclosed / tag_count))
 
-def compute_vllm_validity(ref_image: bytes, base_image: bytes) -> float:
-    client = OpenAI()
-    img1 = base64.b64encode(ref_image).decode()
-    img2 = base64.b64encode(base_image).decode()
-
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": (
-                    "These are two rendered HTML/CSS widget screenshots. "
-                    "Score how closely the second widget matches the first, considering layout structure, "
-                    "color scheme, component placement, and overall visual appearance. "
-                    "Ignore minor browser rendering differences like slight font variations. "
-                    "Use this scale: 0.0 = completely different, 0.5 = same type of widget but different style, 1.0 = nearly identical. "
-                    "Reply with only a decimal number between 0.0 and 1.0."
-                )},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img1}"}},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img2}"}}
-            ]
-        }]
-    )
-
-    score_text = response.choices[0].message.content.strip()
-    try:
-        score = float(score_text)
-    except ValueError:
-        import re
-        match = re.search(r"\d+\.?\d*", score_text)
-        score = float(match.group()) if match else 0.0
-    return max(0.0, min(1.0, score))
-
 _clip_model = None
 _clip_processor = None
 
@@ -265,7 +232,6 @@ def compute_layout_score(ref_html: str, gen_html: str, width=800, height=600) ->
 
     
 def compute_reward_code(target_image: bytes, generated_html: str) -> float:
-    """Programmatic reward: weighted combination of 6 visual similarity metrics."""
     ssim_score = 0.0
     lpips_score = 0.0
     palette_score = 0.0
