@@ -1,5 +1,7 @@
 import torch
 import torch.nn.functional as F
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import os
 import re
@@ -86,7 +88,11 @@ def run_grpo(model, tokenizer, prompts, ground_truths, model_name="Qwen/Qwen2.5-
             completion_scores.extend(group_adv.tolist())
 
         tokens = torch.nn.utils.rnn.pad_sequence(generations, batch_first=True, padding_value=PAD_TOKEN_ID) # batch generations
-        attention_mask = (tokens != PAD_TOKEN_ID).long() # 1 for real tokens, 0 for fake padding
+        # build attention mask from known lengths, not token identity (PAD==EOS would mask real EOS tokens)
+        actual_lengths = [prompt_lengths[s] + completion_lengths[s] for s in range(len(generations))]
+        attention_mask = torch.zeros_like(tokens)
+        for s, length in enumerate(actual_lengths):
+            attention_mask[s, :length] = 1
 
         # compute old_probs from a forward pass, since model.generate is a different path, KV cache rounds bf16, so doing a forward pass is better
         with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.bfloat16):

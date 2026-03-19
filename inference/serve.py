@@ -55,7 +55,7 @@ TEMPLATE = """
             </div>
             <div class="code">
                 <div class="output-label">Generated HTML</div>
-                <pre>{{ html_output }}</pre>
+                <pre>{{ html_output | e }}</pre>
             </div>
         </div>
         {% endif %}

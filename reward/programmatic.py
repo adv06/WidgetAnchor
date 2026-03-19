@@ -1,9 +1,6 @@
 import torch
-import torch.nn as nn
 import tempfile
 import os
-from openai import OpenAI
-import base64
 
 from skimage.metrics import structural_similarity as ssim
 from playwright.sync_api import sync_playwright
@@ -13,7 +10,6 @@ import numpy as np
 from PIL import Image
 import io
 from sklearn.cluster import KMeans
-from scipy import optimize
 from scipy.spatial.distance import cdist
 from scipy.optimize import linear_sum_assignment
 
@@ -109,9 +105,6 @@ def _get_lpips():
             
 
 def compute_clip_similarity(ref_image: bytes, gen_image: bytes) -> float:
-    from PIL import Image
-    import io
-
     model, processor = _get_clip()
 
     img1 = Image.open(io.BytesIO(ref_image)).convert("RGB")
@@ -173,6 +166,8 @@ def compute_contrast_score(img1: bytes, img2: bytes):
     std1 = np.std(img1)
     std2 = np.std(img2)
     
+    if max(std1, std2) == 0:
+        return 1.0
     return 1.0 - abs(std1 - std2) / max(std1, std2)
     
 def _extract_bounding_boxes(html_code: str, width=800, height=600) -> list[dict]:
@@ -231,16 +226,22 @@ def compute_layout_score(ref_html: str, gen_html: str, width=800, height=600) ->
     return IoU[rows, cols].mean()
 
     
-def compute_reward_code(target_image: bytes, generated_html: str) -> float:
+def compute_reward_code(target_image: bytes, generated_html: str, rendered_image: bytes = None) -> float:
+    """Programmatic reward: weighted combination of visual similarity metrics.
+
+    Note: layout_score is excluded because we only have the reference as an image,
+    not as HTML. Layout comparison requires both HTML sources for bounding box extraction.
+    The VLM reward covers layout fidelity instead.
+    """
     ssim_score = 0.0
     lpips_score = 0.0
     palette_score = 0.0
     contrast_score = 0.0
-    layout_score = 0.0
     polarity_score = 0.0
 
     try:
-        rendered_image = render_html_to_image(generated_html)
+        if rendered_image is None:
+            rendered_image = render_html_to_image(generated_html)
 
         # decode both images to numpy for functions that need arrays
         ref_np = cv2.imdecode(np.frombuffer(target_image, dtype=np.uint8), cv2.IMREAD_COLOR)
@@ -255,13 +256,11 @@ def compute_reward_code(target_image: bytes, generated_html: str) -> float:
         palette_score = compute_palette_distance(ref_np, gen_np)
         contrast_score = compute_contrast_score(target_image, rendered_image)
         polarity_score = compute_polarity(ref_np, gen_np)
-        layout_score = compute_layout_score(generated_html, generated_html)  # TODO: need ref HTML too
     except Exception:
         pass
 
-    return (0.15 * ssim_score +
-            0.15 * lpips_score +
+    return (0.20 * ssim_score +
+            0.20 * lpips_score +
             0.25 * palette_score +
-            0.15 * contrast_score +
-            0.20 * layout_score +
-            0.10 * polarity_score)
+            0.20 * contrast_score +
+            0.15 * polarity_score)

@@ -131,7 +131,7 @@ def annotate(input_dir: str, output_dir: str, model: str = "gpt-4o", workers: in
             result = future.result()
             if result is not None:
                 succeeded += 1
-            elif not os.path.exists(os.path.join(output_dir, os.path.basename(futures[future]).replace(".json", ".json"))):
+            elif not os.path.exists(os.path.join(output_dir, os.path.basename(futures[future]))):
                 failed += 1
 
             if (i + 1) % 50 == 0:

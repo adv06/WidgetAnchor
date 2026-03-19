@@ -12,7 +12,6 @@ import glob
 import random
 import base64
 import argparse
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from openai import OpenAI
 from dotenv import load_dotenv
