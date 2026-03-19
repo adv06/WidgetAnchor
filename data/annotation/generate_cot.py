@@ -1,21 +1,5 @@
 """
-Phase 0.3: Chain-of-Thought annotation.
-
-Use a SOTA LLM with BOTH the screenshot and ground-truth HTML as input.
-Generate structured reasoning traces per mission.md Section 0.3.
-
-Output format per sample:
-    <think>
-    ## 1. Structure Analysis
-    ## 2. Layout Plan
-    ## 3. Color & Style Extraction
-    ## 4. Typography & Legibility
-    ## 5. Implementation Plan
-    </think>
-    <code>
-    [ground-truth HTML]
-    </code>
-
+Overall goal is to output annotations given produced image and ground truth
 Usage:
     python -m data.annotation.generate_cot --input_dir ./data/tagged --output_dir ./data/annotated --workers 8
 """
@@ -35,13 +19,13 @@ client = OpenAI()
 COT_SYSTEM_PROMPT = (
     "You are given:\n"
     "1. A screenshot of a UI widget\n"
-    "2. The ground-truth HTML/CSS code that produces this widget\n\n"
+    "2. The ground-truth React+Tailwind component code that produces this widget\n\n"
     "Generate a structured reasoning trace that decomposes the widget into:\n"
     "1. Structure Analysis — what type of widget, component hierarchy\n"
-    "2. Layout Plan — flex/grid, dimensions, padding, margins, gaps\n"
-    "3. Color & Style — exact hex colors, border-radius, shadows\n"
-    "4. Typography — font family, sizes, weights, line-heights, contrast\n"
-    "5. Implementation Plan — HTML structure outline\n\n"
+    "2. Layout Plan — flex/grid, dimensions, padding, margins, gaps (Tailwind classes)\n"
+    "3. Color & Style — exact hex colors via `bg-[#hex]`, border-radius, shadows\n"
+    "4. Typography — text sizes, font weights, leading, tracking\n"
+    "5. Implementation Plan — React component structure outline\n\n"
     "Then include the ground-truth code.\n\n"
     "Format your output EXACTLY as:\n"
     "<think>\n"
@@ -57,23 +41,23 @@ COT_SYSTEM_PROMPT = (
     "[your analysis]\n"
     "</think>\n"
     "<code>\n"
-    "[the ground-truth HTML code]\n"
+    "[the ground-truth React component]\n"
     "</code>\n\n"
-    "Be precise with hex color values, pixel dimensions, and CSS properties. "
+    "Be precise with hex color values, Tailwind classes, and component props. "
     "The reasoning should directly map to the code that follows."
 )
 
 
-def generate_cot(screenshot_path: str, html: str, model: str = "gpt-4o") -> str:
+def generate_cot(screenshot_path: str, tsx: str, model: str = "gpt-4o") -> str:
     with open(screenshot_path, "rb") as f:
-        img_b64 = base64.b64encode(f.read()).decode()
+        img_b64 = base64.b64encode(f.read()).decode() # convert image to base 64 encoded string
 
     response = client.chat.completions.create(
         model=model,
         messages=[
             {"role": "system", "content": COT_SYSTEM_PROMPT},
             {"role": "user", "content": [
-                {"type": "text", "text": f"Here is the ground-truth HTML code:\n\n```html\n{html}\n```\n\nGenerate the structured reasoning trace for this widget."},
+                {"type": "text", "text": f"Here is the ground-truth React component:\n\n```tsx\n{tsx}\n```\n\nGenerate the structured reasoning trace for this widget."},
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
             ]},
         ],
@@ -85,7 +69,7 @@ def generate_cot(screenshot_path: str, html: str, model: str = "gpt-4o") -> str:
 
 def process_one(path: str, output_dir: str, model: str) -> dict | None:
     with open(path) as f:
-        sample = json.load(f)
+        sample = json.load(f) # path contains ground truth tsx and widget screenshot
 
     widget_id = sample["widget_id"]
     out_path = os.path.join(output_dir, f"{widget_id}.json")
@@ -95,7 +79,7 @@ def process_one(path: str, output_dir: str, model: str) -> dict | None:
         return None
 
     try:
-        cot_output = generate_cot(sample["screenshot_path"], sample["html"], model=model)
+        cot_output = generate_cot(sample["screenshot_path"], sample["tsx"], model=model)
 
         # validate that output has both <think> and <code> tags
         if "<think>" not in cot_output or "<code>" not in cot_output:
@@ -116,16 +100,16 @@ def process_one(path: str, output_dir: str, model: str) -> dict | None:
 def annotate(input_dir: str, output_dir: str, model: str = "gpt-4o", workers: int = 8):
     os.makedirs(output_dir, exist_ok=True)
 
-    files = sorted(glob.glob(os.path.join(input_dir, "widget-*.json")))
+    files = sorted(glob.glob(os.path.join(input_dir, "*.json")))
     print(f"Found {len(files)} samples to annotate")
 
-    already_done = len(glob.glob(os.path.join(output_dir, "widget-*.json")))
+    already_done = len(glob.glob(os.path.join(output_dir, "*.json")))
     print(f"Already annotated: {already_done}")
 
     succeeded = already_done
     failed = 0
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
+    with ThreadPoolExecutor(max_workers=workers) as pool: # multiple threads to generate cot
         futures = {pool.submit(process_one, p, output_dir, model): p for p in files}
         for i, future in enumerate(as_completed(futures)):
             result = future.result()

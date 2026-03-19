@@ -1,7 +1,7 @@
 """
 Phase 0.2 (Step 5): Difficulty tagging.
 
-Tag each sample as simple/medium/complex based on HTML token count.
+Tag each sample as simple/medium/complex based on TSX token count.
 - Simple: <50 tokens
 - Medium: 50-200 tokens
 - Complex: >200 tokens
@@ -16,16 +16,16 @@ import argparse
 import re
 
 
-def count_tokens(html: str) -> int:
+def count_tokens(tsx: str) -> int:
     """Rough token count: split on whitespace and punctuation boundaries."""
-    tokens = re.findall(r'\w+|[^\w\s]', html)
+    tokens = re.findall(r'\w+|[^\w\s]', tsx)
     return len(tokens)
 
 
 def tag_difficulty(input_dir: str, output_dir: str):
     os.makedirs(output_dir, exist_ok=True)
 
-    files = sorted(glob.glob(os.path.join(input_dir, "widget-*.json")))
+    files = sorted(glob.glob(os.path.join(input_dir, "*.json")))
     print(f"Found {len(files)} samples to tag")
 
     counts = {"simple": 0, "medium": 0, "complex": 0}
@@ -34,7 +34,7 @@ def tag_difficulty(input_dir: str, output_dir: str):
         with open(path) as f:
             sample = json.load(f)
 
-        token_count = count_tokens(sample["html"])
+        token_count = count_tokens(sample["tsx"])
 
         if token_count < 50:
             difficulty = "simple"

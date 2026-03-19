@@ -20,25 +20,25 @@ load_dotenv()
 
 client = OpenAI()
 
-WIDGET2CODE_DATA_DIR = "/shared/houston/widget2code/widget2code-sft/widget-factory-synthetic-data"
+WIDGET2CODE_DATA_DIR = "/shared/houston/widget2code/widget2code-sft/widget-factory-sft-models/50000-allicons-qwen3-max-all"
 
 SYSTEM_PROMPT = (
     "You are an expert frontend developer. Given a screenshot of a UI widget, "
-    "generate a single self-contained HTML file with inline CSS that recreates the widget as closely as possible.\n\n"
+    "generate a React functional component with Tailwind CSS that recreates the widget as closely as possible.\n\n"
     "Requirements:\n"
-    "- Output a complete HTML document (<!DOCTYPE html>, <html>, <head>, <body>)\n"
-    "- All CSS must be inline in a <style> tag — no external stylesheets\n"
-    "- No JavaScript, no external dependencies, no CDN links\n"
-    "- Use standard HTML elements only (div, span, button, input, p, h1-h6, etc.)\n"
-    "- Match colors exactly (use hex values)\n"
+    "- Output a single default-exported React component: `export default function Widget() { ... }`\n"
+    "- Use Tailwind CSS utility classes for all styling\n"
+    "- Colors: use exact hex values via arbitrary-value syntax (e.g. `bg-[#3B82F6]`)\n"
+    "- Charts/gauges/progress: use recharts (import from 'recharts')\n"
+    "- Icons: use lucide-react (import from 'lucide-react')\n"
     "- Match spacing, padding, margins, border-radius, shadows precisely\n"
     "- Match font sizes, weights, and line heights\n"
     "- The widget should be centered on the page\n"
-    "- Return ONLY the HTML code, no markdown, no explanation, no code fences"
+    "- Return ONLY the component code, no markdown, no explanation, no code fences"
 )
 
 USER_PROMPT = (
-    "Recreate this widget as a self-contained HTML file with inline CSS. "
+    "Recreate this widget as a React functional component with Tailwind CSS. "
     "Match the layout, colors, typography, spacing, and visual appearance as closely as possible."
 )
 
@@ -68,7 +68,7 @@ def load_widget_paths(data_dir: str, num_samples: int = None) -> list[dict]:
     return samples
 
 
-def generate_html_from_image(image_path: str, model: str = "gpt-4o") -> str:
+def generate_tsx_from_image(image_path: str, model: str = "gpt-4o") -> str:
     with open(image_path, "rb") as f:
         img_b64 = base64.b64encode(f.read()).decode()
 
@@ -98,16 +98,16 @@ def process_one(sample: dict, output_dir: str, model: str) -> dict | None:
         return None
 
     try:
-        html = generate_html_from_image(screenshot_path, model=model)
+        tsx = generate_tsx_from_image(screenshot_path, model=model)
 
-        # basic sanity: must contain <!DOCTYPE or <html
-        if "<html" not in html.lower():
+        # basic sanity: must contain export default
+        if "export default" not in tsx:
             return None
 
         result = {
             "widget_id": widget_id,
             "screenshot_path": screenshot_path,
-            "html": html,
+            "tsx": tsx,
         }
 
         with open(output_path, "w") as f:

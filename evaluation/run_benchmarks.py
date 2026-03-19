@@ -1,9 +1,6 @@
 """
 Phase 4: Evaluation on Widget2Code benchmark.
 
-Generates HTML for each benchmark widget using our model, saves results,
-then runs the Widget2Code evaluation scripts.
-
 Benchmark: https://github.com/Djanghao/widget2code
 Dataset: https://huggingface.co/datasets/Djanghao/widget2code-benchmark
 
@@ -30,8 +27,8 @@ import argparse
 import torch
 from inference.generate import load_model, generate, extract_code
 from inference.polish import generate_with_polish
-from reward.programmatic import render_html_to_image
-from training.sft import SYSTEM_PROMPT
+from reward.programmatic import render_tsx_to_image, compute_reward_code
+from training.sft import MODEL_NAME
 
 
 def run_benchmark(checkpoint: str, model_name: str, gt_dir: str, output_dir: str,
@@ -39,19 +36,17 @@ def run_benchmark(checkpoint: str, model_name: str, gt_dir: str, output_dir: str
                   device: str = "cuda:0"):
     os.makedirs(output_dir, exist_ok=True)
 
-    model, tokenizer = load_model(model_name, checkpoint, device=device)
+    model, processor = load_model(checkpoint, model_name=model_name, device=device)
 
-    # find all benchmark widgets (PNG screenshots in gt_dir)
     widget_images = sorted(glob.glob(os.path.join(gt_dir, "**", "*.png"), recursive=True))
     print(f"Found {len(widget_images)} benchmark widgets in {gt_dir}")
 
     results = []
     for i, img_path in enumerate(widget_images):
         widget_id = os.path.splitext(os.path.basename(img_path))[0]
-        html_out_path = os.path.join(output_dir, f"{widget_id}.html")
+        tsx_out_path = os.path.join(output_dir, f"{widget_id}.tsx")
 
-        # skip if already generated (resumable)
-        if os.path.exists(html_out_path):
+        if os.path.exists(tsx_out_path):
             continue
 
         print(f"[{i+1}/{len(widget_images)}] {widget_id}")
@@ -61,24 +56,23 @@ def run_benchmark(checkpoint: str, model_name: str, gt_dir: str, output_dir: str
 
         try:
             if use_polish:
-                html, score = generate_with_polish(model, tokenizer, ref_image, n=n, polish_rounds=polish_rounds)
+                tsx, score = generate_with_polish(model, processor, img_path, ref_image, n=n, polish_rounds=polish_rounds)
             else:
-                prompt = SYSTEM_PROMPT + "\nRecreate the widget shown in the reference image."
-                text = generate(model, tokenizer, prompt)
-                html = extract_code(text)
-                score = 0.0
+                text = generate(model, processor, img_path)
+                tsx = extract_code(text)
+                score = compute_reward_code(ref_image, tsx) if tsx else 0.0
 
-            if html is None:
+            if tsx is None:
                 print(f"  Failed to generate code")
                 continue
 
-            # save HTML
-            with open(html_out_path, "w") as f:
-                f.write(html)
+            # save TSX
+            with open(tsx_out_path, "w") as f:
+                f.write(tsx)
 
             # render and save screenshot
             try:
-                rendered = render_html_to_image(html)
+                rendered = render_tsx_to_image(tsx)
                 png_path = os.path.join(output_dir, f"{widget_id}.png")
                 with open(png_path, "wb") as f:
                     f.write(rendered)
@@ -103,7 +97,7 @@ def run_benchmark(checkpoint: str, model_name: str, gt_dir: str, output_dir: str
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-1.5B")
+    parser.add_argument("--model_name", type=str, default=MODEL_NAME)
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--gt_dir", type=str, default="./data/widget2code-benchmark/test")
     parser.add_argument("--output_dir", type=str, default="./output/benchmark_results")

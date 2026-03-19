@@ -5,3 +5,5 @@ plots/
 output/
 evaluation/widget2code/
 evaluation/benchmarks_backup/
+render/node_modules/
+mission.md

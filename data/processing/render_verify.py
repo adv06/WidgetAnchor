@@ -14,7 +14,7 @@ import argparse
 import numpy as np
 import cv2
 from skimage.metrics import structural_similarity as ssim
-from reward.programmatic import render_html_to_image
+from reward.programmatic import render_tsx_to_image
 
 
 def compute_ssim(ref_bytes: bytes, rendered_bytes: bytes) -> float:
@@ -34,7 +34,7 @@ def verify(input_dir: str, output_dir: str, threshold: float = 0.85):
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(os.path.join(output_dir, "rendered"), exist_ok=True)
 
-    raw_files = sorted(glob.glob(os.path.join(input_dir, "widget-*.json")))
+    raw_files = sorted(glob.glob(os.path.join(input_dir, "*.json")))
     print(f"Found {len(raw_files)} raw samples to verify")
 
     kept = 0
@@ -46,12 +46,12 @@ def verify(input_dir: str, output_dir: str, threshold: float = 0.85):
             sample = json.load(f)
 
         widget_id = sample["widget_id"]
-        html = sample["html"]
+        tsx = sample["tsx"]
         screenshot_path = sample["screenshot_path"]
 
-        # render the generated HTML
+        # render the generated TSX
         try:
-            rendered_bytes = render_html_to_image(html)
+            rendered_bytes = render_tsx_to_image(tsx)
         except Exception:
             render_failed += 1
             continue

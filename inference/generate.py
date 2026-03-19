@@ -1,7 +1,5 @@
 """
-Phase 3: Single-shot generation.
-
-Generate HTML from a widget screenshot using the trained model.
+Phase 3: Single-shot generation with GLM-4.1V VLM.
 
 Usage:
     python -m inference.generate --checkpoint /shared/advey/checkpoints/grpo_final --image widget.png
@@ -9,34 +7,38 @@ Usage:
 import re
 import torch
 import argparse
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoProcessor, Glm4vForConditionalGeneration
 from peft import PeftModel
-from training.sft import SYSTEM_PROMPT
+from training.sft import SYSTEM_PROMPT, MODEL_NAME, _user_message
 
 
-def load_model(model_name: str, checkpoint_path: str, device: str = "cuda:0"):
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    tokenizer.pad_token = tokenizer.eos_token
-
-    base_model = AutoModelForCausalLM.from_pretrained(
-        model_name, torch_dtype="auto", device_map={"": device}
+def load_model(checkpoint_path: str, model_name: str = MODEL_NAME, device: str = "cuda:0"):
+    processor = AutoProcessor.from_pretrained(model_name, use_fast=True)
+    base_model = Glm4vForConditionalGeneration.from_pretrained(
+        model_name, torch_dtype=torch.bfloat16, device_map={"": device}
     )
     model = PeftModel.from_pretrained(base_model, checkpoint_path)
     model.eval()
-    return model, tokenizer
+    return model, processor
 
 
-def generate(model, tokenizer, prompt: str, temperature: float = 0.7, max_new_tokens: int = 2048) -> str:
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+def generate(model, processor, image_path: str, temperature: float = 0.7, max_new_tokens: int = 2048) -> str:
+    messages = [
+        {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT}]},
+        {"role": "user", "content": _user_message(image_path)},
+    ]
+    inputs = processor.apply_chat_template(
+        messages, tokenize=True, add_generation_prompt=True,
+        return_dict=True, return_tensors="pt"
+    ).to(model.device)
+
     with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.bfloat16):
         output = model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            do_sample=True,
+            **inputs, max_new_tokens=max_new_tokens,
+            temperature=temperature, do_sample=True,
         )
     prompt_len = inputs["input_ids"].shape[1]
-    text = tokenizer.decode(output[0][prompt_len:], skip_special_tokens=True)
+    text = processor.tokenizer.decode(output[0][prompt_len:], skip_special_tokens=True)
     return text
 
 
@@ -47,19 +49,17 @@ def extract_code(text: str) -> str | None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-1.5B")
     parser.add_argument("--checkpoint", type=str, required=True)
-    parser.add_argument("--prompt", type=str, default="Recreate the widget shown in the reference image.")
+    parser.add_argument("--image", type=str, required=True, help="Path to widget screenshot")
     parser.add_argument("--temperature", type=float, default=0.7)
     args = parser.parse_args()
 
-    model, tokenizer = load_model(args.model_name, args.checkpoint)
-    full_prompt = SYSTEM_PROMPT + "\n" + args.prompt
-    text = generate(model, tokenizer, full_prompt, temperature=args.temperature)
+    model, processor = load_model(args.checkpoint)
+    text = generate(model, processor, args.image, temperature=args.temperature)
 
-    html = extract_code(text)
-    if html:
-        print(html)
+    tsx = extract_code(text)
+    if tsx:
+        print(tsx)
     else:
         print("No <code> block found in output:")
         print(text)

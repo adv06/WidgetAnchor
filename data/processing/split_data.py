@@ -17,7 +17,7 @@ import argparse
 def split(input_dir: str, output_dir: str, seed: int = 42):
     os.makedirs(output_dir, exist_ok=True)
 
-    files = sorted(glob.glob(os.path.join(input_dir, "widget-*.json")))
+    files = sorted(glob.glob(os.path.join(input_dir, "*.json")))
     print(f"Found {len(files)} annotated samples")
 
     dataset = []
@@ -28,7 +28,7 @@ def split(input_dir: str, output_dir: str, seed: int = 42):
         dataset.append({
             "widget_id": sample["widget_id"],
             "screenshot_path": sample["screenshot_path"],
-            "html": sample["html"],
+            "tsx": sample["tsx"],
             "cot": sample["cot"],
             "difficulty": sample.get("difficulty", "unknown"),
             "token_count": sample.get("token_count", 0),

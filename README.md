@@ -1,90 +1,143 @@
-# WidgetAnchor V1
+# WidgetAnchor
 
-Train a language model to generate HTML/CSS widgets from natural language descriptions using SFT + GRPO reinforcement learning.
+Fine-tunes GLM-4.1V-9B-Thinking (a 9B-param VLM) with LoRA to reverse-engineer UI widgets: screenshot → React+Tailwind TSX component. Pipeline: data collection → SFT → GRPO → inference → evaluation.
 
 ## Overview
 
-WidgetAnchor fine-tunes Qwen2.5-7B (with LoRA) in two phases:
+WidgetAnchor fine-tunes `zai-org/GLM-4.1V-9B-Thinking` in two phases:
 
-1. **Supervised Fine-Tuning (SFT)** — teaches the model the HTML/CSS generation format using teacher forcing against ground truth code
-2. **Group Relative Policy Optimization (GRPO)** — improves visual quality by rewarding generations that visually match target widget screenshots (SSIM + HTML validity + VLM scoring)
+1. **Supervised Fine-Tuning (SFT)** — cross-entropy on structured chain-of-thought completions (5-section reasoning trace + React component)
+2. **Group Relative Policy Optimization (GRPO)** — custom PPO-clip implementation with hybrid reward: programmatic image similarity metrics + VLM pairwise judging via round-robin tournament
 
-The GRPO implementation is written from scratch (not using TRL) with the following optimizations:
-- Per-token PPO clipping with Schulman KL approximation
-- vLLM for fast generation (PagedAttention, continuous batching)
-- LoRA with merge/unmerge for vLLM weight sync
-- Flash Attention 2, bf16 mixed precision, torch.compile
-- Gradient accumulation with cosine LR scheduling
+The model takes a widget screenshot as input and outputs `<think>CoT reasoning</think><code>React+Tailwind TSX</code>`.
 
 ## Project Structure
 
 ```
-generate_data.py          # Dataset generation (GPT-4o + Playwright rendering)
-sft.py                    # Supervised fine-tuning loop
-training_loop_grpo.py     # Custom GRPO training loop
-training_loop_trl.py      # Alternative TRL-based GRPO (for reference)
-pipeline.py               # Orchestrates SFT -> GRPO training
-reward.py                 # Reward model (SSIM, HTML validity, VLM)
-serve.py                  # Flask inference server with live preview
+data/
+  collection/
+    collect_widget_factory.py   # Reverse-engineer 10K widget screenshots via GPT-4o
+    generate_synthetic.py       # Generate 10K+ synthetic widgets from random categories
+  processing/
+    render_verify.py            # Render TSX, filter by SSIM >= 0.85
+    dedup.py                    # dHash + LSH deduplication
+    tag_difficulty.py           # simple/medium/complex by token count
+    split_data.py               # 90/5/5 train/val/test split
+  annotation/
+    generate_cot.py             # GPT-4o generates structured CoT traces
+  run_pipeline.sh               # Master script for full data pipeline
+
+training/
+  sft.py                        # SFT loop (defines SYSTEM_PROMPT, shared constants)
+  training_loop_grpo.py         # Custom GRPO with reference adapter trick
+  pipeline.py                   # Orchestrates SFT → GRPO
+  run_grpo_only.py              # Resume GRPO from SFT checkpoint
+
+reward/
+  programmatic.py               # 5-metric blend (SSIM, LPIPS, palette, contrast, polarity)
+  vlm_reward.py                 # GPT-4o absolute + pairwise scoring
+  round_robin.py                # Tournament ranking for GRPO rollouts
+  composite.py                  # 40% programmatic + 60% VLM hybrid
+
+inference/
+  generate.py                   # Single-shot generation
+  best_of_n.py                  # N candidates → highest scoring
+  polish.py                     # Iterative multi-round refinement
+
+evaluation/
+  run_benchmarks.py             # Generate TSX + PNG for Widget2Code benchmark
+  setup_benchmark.sh            # Download benchmark data
+
+render/                         # esbuild + Playwright TSX → PNG pipeline
 ```
 
 ## Setup
 
 ```bash
-pip install torch transformers peft vllm einops flask playwright openai
+pip install torch transformers peft einops flask playwright openai scikit-image opencv-python lpips
 playwright install chromium
+cd render && npm install
 ```
+
+Requires an `.env` file with `OPENAI_API_KEY` for GPT-4o calls (data collection, CoT annotation, VLM reward).
 
 ## Usage
 
-### 1. Generate training data
+### 1. Collect and generate training data
 
-Uses GPT-4o to create HTML widgets across 40 widget types and 10 style variants, then renders them to screenshots with Playwright.
+Two parallel data collection paths writing to `output/raw/` with non-colliding ID prefixes (`widget-*` and `synthetic-*`):
 
 ```bash
-python generate_data.py
-```
+# Full pipeline (collection + processing + annotation + split)
+bash data/run_pipeline.sh
 
-This creates `./data/train.json` and `./data/val.json` with prompt-HTML-image triples.
+# Or run individually:
+python -m data.collection.collect_widget_factory --num_samples 10000 --output_dir ./output/raw --workers 8
+python -m data.collection.generate_synthetic --num_samples 10000 --output_dir ./output/raw --workers 8
+```
 
 ### 2. Train
 
-Runs SFT (500 steps) then GRPO (1000 steps). Checkpoints are saved to `./checkpoints/`.
+Runs SFT then GRPO. Checkpoints saved to `checkpoints/`.
 
 ```bash
-python pipeline.py
+python -m training.pipeline
 ```
 
-### 3. Serve
-
-Launches a local web UI where you can type widget descriptions and see generated HTML rendered live.
+Or resume GRPO from an existing SFT checkpoint:
 
 ```bash
-python serve.py
+python -m training.run_grpo_only
 ```
 
-Open [http://localhost:5000](http://localhost:5000) in your browser.
+### 3. Inference
+
+```bash
+# Single-shot
+python -m inference.generate --image_path widget.png
+
+# Best-of-N + iterative polish
+python -m inference.polish --image_path widget.png
+```
+
+### 4. Evaluate
+
+```bash
+bash evaluation/setup_benchmark.sh
+python -m evaluation.run_benchmarks
+```
 
 ## Reward Signal
 
-The reward for each generated HTML widget is a weighted combination of:
+### Programmatic (`compute_reward_code`) — weighted blend of 5 metrics:
 
-| Component | Weight | Description |
-|-----------|--------|-------------|
-| SSIM | 0.5 | Structural similarity between rendered screenshot and target image |
-| HTML validity | 0.2 | Whether the generated HTML parses correctly |
-| VLM score | 0.3 | Vision-language model assessment of visual fidelity |
+| Metric | Weight | Description |
+|--------|--------|-------------|
+| SSIM | 0.15 | Structural similarity |
+| LPIPS | 0.15 | Perceptual distance (AlexNet) |
+| Palette | 0.20 | K-means color clustering + Hungarian matching |
+| Contrast | 0.15 | Grayscale std deviation similarity |
+| Polarity | 0.10 | Lightness histogram correlation (LAB space) |
+| Layout   | 0.20 | Intersection over Union | 
 
-## Configuration
+### GRPO reward — round-robin tournament:
+1. Pre-filter: programmatic score < 0.3 → eliminated
+2. All-pairs VLM pairwise comparison on survivors
+3. Win counts = reward signal
 
-Key hyperparameters in `pipeline.py`:
+## Key Hyperparameters
 
 | Parameter | SFT | GRPO |
 |-----------|-----|------|
 | Learning rate | 1e-4 | 1e-5 |
-| Training steps | 500 | 1000 |
-| LoRA rank | 16 | 16 |
-| Grad accumulation | - | 4 |
+| LoRA rank / alpha | 16 / 32 | 16 / 32 |
 | Clipping (eps) | - | 0.2 |
 | KL penalty (beta) | - | 0.05 |
 | Generations per prompt (n) | - | 5 |
+| Inner epochs | - | 4 |
+
+## Model
+
+- **Base**: `zai-org/GLM-4.1V-9B-Thinking` (9B param VLM)
+- **Adaptation**: LoRA r=16, α=32, dropout=0.05, targets: q/k/v/o projections
+- **Precision**: bfloat16 with gradient checkpointing

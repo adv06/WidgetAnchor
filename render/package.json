@@ -1,0 +1,11 @@
+{
+  "name": "widget-anchor-render",
+  "private": true,
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "recharts": "^2.15.3",
+    "lucide-react": "^0.474.0",
+    "esbuild": "^0.25.0"
+  }
+}

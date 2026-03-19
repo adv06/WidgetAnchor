@@ -1,6 +1,9 @@
 import torch
 import tempfile
 import os
+import shutil
+import subprocess
+from pathlib import Path
 
 from skimage.metrics import structural_similarity as ssim
 from playwright.sync_api import sync_playwright
@@ -17,6 +20,13 @@ from scipy.optimize import linear_sum_assignment
 _playwright_instance = None
 _browser = None
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# paths for the esbuild render pipeline
+_RENDER_DIR = Path(__file__).resolve().parent.parent / "render"
+_NODE_MODULES = _RENDER_DIR / "node_modules"
+_TEMPLATE_HTML = _RENDER_DIR / "template.html"
+_ESBUILD_BIN = _NODE_MODULES / ".bin" / "esbuild"
+
 def _get_browser():
     global _playwright_instance, _browser
     if _browser is None:
@@ -25,21 +35,70 @@ def _get_browser():
     return _browser
 
 
-def render_html_to_image(html_code: str, width=800, height=600) -> bytes:
-    with tempfile.NamedTemporaryFile(suffix=".html", delete=False, mode="w", encoding="utf-8") as f:
-        f.write(html_code)
-        tmp_path = f.name
-
+def render_tsx_to_image(tsx_code: str, width=800, height=600) -> bytes:
+    """Render a React+Tailwind TSX component to a PNG screenshot via esbuild + Playwright."""
+    tmp_dir = tempfile.mkdtemp(prefix="widget_render_")
     try:
+        # write the user's component
+        comp_path = os.path.join(tmp_dir, "component.tsx")
+        with open(comp_path, "w", encoding="utf-8") as f:
+            f.write(tsx_code)
+
+        # write entry point that mounts the component
+        entry_path = os.path.join(tmp_dir, "entry.tsx")
+        with open(entry_path, "w", encoding="utf-8") as f:
+            f.write(
+                'import React from "react";\n'
+                'import { createRoot } from "react-dom/client";\n'
+                'import Widget from "./component";\n'
+                'createRoot(document.getElementById("root")!).render(<Widget />);\n'
+            )
+
+        # symlink node_modules so esbuild can resolve packages
+        nm_link = os.path.join(tmp_dir, "node_modules")
+        os.symlink(str(_NODE_MODULES), nm_link)
+
+        # bundle with esbuild
+        result = subprocess.run(
+            [
+                str(_ESBUILD_BIN), "entry.tsx",
+                "--bundle",
+                "--outfile=bundle.js",
+                "--format=iife",
+                "--jsx=automatic",
+                "--loader:.tsx=tsx",
+            ],
+            cwd=tmp_dir,
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"esbuild failed:\n{result.stderr}")
+
+        # copy the HTML template
+        shutil.copy2(str(_TEMPLATE_HTML), os.path.join(tmp_dir, "index.html"))
+
+        # render with Playwright
         browser = _get_browser()
         page = browser.new_page(viewport={"width": width, "height": height})
-        page.goto(f"file:///{tmp_path}")
+        page.goto(f"file://{os.path.join(tmp_dir, 'index.html')}")
         page.wait_for_load_state("networkidle")
+
+        # auto-resize viewport to the #root bounding box
+        root = page.query_selector("#root")
+        if root:
+            bb = root.bounding_box()
+            if bb and bb["width"] > 0 and bb["height"] > 0:
+                new_w = min(int(bb["width"]) + 2, 1920)
+                new_h = min(int(bb["height"]) + 2, 1080)
+                page.set_viewport_size({"width": new_w, "height": new_h})
+                page.wait_for_timeout(100)
+
         png_bytes = page.screenshot()
         page.close()
         return png_bytes
     finally:
-        os.unlink(tmp_path)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
 
 
 def compute_reward_image(ref_image: bytes, base_image: bytes) -> float:
@@ -54,32 +113,6 @@ def compute_reward_image(ref_image: bytes, base_image: bytes) -> float:
     return score
 
 
-def compute_html_validity(html_code: str) -> float:
-    from html.parser import HTMLParser
-
-    tags_opened = []
-    tag_count = 0
-
-    class _Parser(HTMLParser):
-        def handle_starttag(self, tag, attrs):
-            nonlocal tag_count
-            tags_opened.append(tag)
-            tag_count += 1
-
-        def handle_endtag(self, tag):
-            if tags_opened and tags_opened[-1] == tag:
-                tags_opened.pop()
-
-    try:
-        _Parser().feed(html_code)
-    except Exception:
-        return 0.0
-
-    if tag_count == 0:
-        return 0.0
-
-    unclosed = len(tags_opened)
-    return max(0.0, 1.0 - (unclosed / tag_count))
 
 _clip_model = None
 _clip_processor = None
@@ -170,16 +203,41 @@ def compute_contrast_score(img1: bytes, img2: bytes):
         return 1.0
     return 1.0 - abs(std1 - std2) / max(std1, std2)
     
-def _extract_bounding_boxes(html_code: str, width=800, height=600) -> list[dict]:
-    """Render HTML in Playwright and extract bounding boxes of all visible elements."""
-    with tempfile.NamedTemporaryFile(suffix=".html", delete=False, mode="w", encoding="utf-8") as f:
-        f.write(html_code)
-        tmp_path = f.name
-
+def _extract_bounding_boxes(tsx_code: str, width=800, height=600) -> list[dict]:
+    """Render TSX in Playwright and extract bounding boxes of all visible elements."""
+    tmp_dir = tempfile.mkdtemp(prefix="widget_bbox_")
     try:
+        # write component
+        with open(os.path.join(tmp_dir, "component.tsx"), "w", encoding="utf-8") as f:
+            f.write(tsx_code)
+
+        # write entry point
+        with open(os.path.join(tmp_dir, "entry.tsx"), "w", encoding="utf-8") as f:
+            f.write(
+                'import React from "react";\n'
+                'import { createRoot } from "react-dom/client";\n'
+                'import Widget from "./component";\n'
+                'createRoot(document.getElementById("root")!).render(<Widget />);\n'
+            )
+
+        os.symlink(str(_NODE_MODULES), os.path.join(tmp_dir, "node_modules"))
+
+        result = subprocess.run(
+            [
+                str(_ESBUILD_BIN), "entry.tsx",
+                "--bundle", "--outfile=bundle.js",
+                "--format=iife", "--jsx=automatic", "--loader:.tsx=tsx",
+            ],
+            cwd=tmp_dir, capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            return []
+
+        shutil.copy2(str(_TEMPLATE_HTML), os.path.join(tmp_dir, "index.html"))
+
         browser = _get_browser()
         page = browser.new_page(viewport={"width": width, "height": height})
-        page.goto(f"file:///{tmp_path}")
+        page.goto(f"file://{os.path.join(tmp_dir, 'index.html')}")
         page.wait_for_load_state("networkidle")
 
         elements = page.query_selector_all("*")
@@ -197,13 +255,13 @@ def _extract_bounding_boxes(html_code: str, width=800, height=600) -> list[dict]
         page.close()
         return boxes
     finally:
-        os.unlink(tmp_path)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-def compute_layout_score(ref_html: str, gen_html: str, width=800, height=600) -> float:
-    """Compare layout similarity by extracting element bounding boxes from both renders."""
-    ref_boxes = _extract_bounding_boxes(ref_html, width, height)
-    gen_boxes = _extract_bounding_boxes(gen_html, width, height)
+def compute_layout_score(ref_tsx: str, gen_tsx: str, width=800, height=600) -> float:
+    # layout score by IoU
+    ref_boxes = _extract_bounding_boxes(ref_tsx, width, height)
+    gen_boxes = _extract_bounding_boxes(gen_tsx, width, height)
 
     if not ref_boxes or not gen_boxes:
         return 0.0
@@ -226,22 +284,18 @@ def compute_layout_score(ref_html: str, gen_html: str, width=800, height=600) ->
     return IoU[rows, cols].mean()
 
     
-def compute_reward_code(target_image: bytes, generated_html: str, rendered_image: bytes = None) -> float:
-    """Programmatic reward: weighted combination of visual similarity metrics.
-
-    Note: layout_score is excluded because we only have the reference as an image,
-    not as HTML. Layout comparison requires both HTML sources for bounding box extraction.
-    The VLM reward covers layout fidelity instead.
-    """
+def compute_reward_code(target_image: bytes, generated_tsx: str, rendered_image: bytes = None,
+                        ref_tsx: str = None) -> float:
     ssim_score = 0.0
     lpips_score = 0.0
     palette_score = 0.0
     contrast_score = 0.0
     polarity_score = 0.0
+    layout_score = 0.0
 
     try:
         if rendered_image is None:
-            rendered_image = render_html_to_image(generated_html)
+            rendered_image = render_tsx_to_image(generated_tsx)
 
         # decode both images to numpy for functions that need arrays
         ref_np = cv2.imdecode(np.frombuffer(target_image, dtype=np.uint8), cv2.IMREAD_COLOR)
@@ -256,11 +310,22 @@ def compute_reward_code(target_image: bytes, generated_html: str, rendered_image
         palette_score = compute_palette_distance(ref_np, gen_np)
         contrast_score = compute_contrast_score(target_image, rendered_image)
         polarity_score = compute_polarity(ref_np, gen_np)
+
+        if ref_tsx is not None:
+            layout_score = compute_layout_score(ref_tsx, generated_tsx)
     except Exception:
         pass
 
-    return (0.20 * ssim_score +
-            0.20 * lpips_score +
-            0.25 * palette_score +
-            0.20 * contrast_score +
-            0.15 * polarity_score)
+    if ref_tsx is not None:
+        return (0.15 * ssim_score +
+                0.15 * lpips_score +
+                0.20 * palette_score +
+                0.15 * contrast_score +
+                0.15 * polarity_score +
+                0.20 * layout_score)
+    else:
+        return (0.20 * ssim_score +
+                0.20 * lpips_score +
+                0.25 * palette_score +
+                0.20 * contrast_score +
+                0.15 * polarity_score)

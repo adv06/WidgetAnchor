@@ -1,13 +1,13 @@
-from reward.programmatic import compute_reward_code, render_html_to_image
+from reward.programmatic import compute_reward_code, render_tsx_to_image
 from reward.vlm_reward import compute_vlm_reward
 
 
-def compute_composite_reward(ref_image: bytes, generated_html: str,
+def compute_composite_reward(ref_image: bytes, generated_tsx: str,
                              model: str = "gpt-4o") -> dict:
     # render once, pass to both scorers
-    rendered_image = render_html_to_image(generated_html)
+    rendered_image = render_tsx_to_image(generated_tsx)
 
-    R_prog = compute_reward_code(ref_image, generated_html, rendered_image=rendered_image)
+    R_prog = compute_reward_code(ref_image, generated_tsx, rendered_image=rendered_image)
     vlm_scores = compute_vlm_reward(ref_image, rendered_image, model=model)
     R_vlm = vlm_scores["total"]
 

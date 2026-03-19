@@ -1,72 +1,69 @@
-"""
-Phase 3.2: Iterative polishing.
+# Usage: python -m inference.polish --checkpoint /shared/advey/checkpoints/grpo_final --image widget.png --rounds 3
 
-Takes a reference screenshot + initial code, renders it, then asks the model
-to improve the code by comparing the render against the reference.
-UI2Code^N showed +12% improvement with 4 rounds.
-
-Usage:
-    python -m inference.polish --checkpoint /shared/advey/checkpoints/grpo_final --image widget.png --rounds 3
-"""
-import re
 import argparse
-import torch
-from inference.generate import load_model, generate, extract_code
+from inference.generate import load_model, extract_code
 from inference.best_of_n import best_of_n
-from reward.programmatic import compute_reward_code, render_html_to_image
-from training.sft import SYSTEM_PROMPT
+from reward.programmatic import compute_reward_code
+from training.sft import _get_image_size
+import torch
 
 
 POLISH_PROMPT = (
-    "You are given:\n"
-    "1. A reference widget screenshot (the target design)\n"
-    "2. Your previous HTML/CSS code attempt\n"
-    "3. A screenshot of how your code currently renders\n\n"
-    "Compare the rendered result against the reference. Identify differences in:\n"
-    "- Layout (spacing, alignment, sizes)\n"
-    "- Colors (palette, gradients, backgrounds)\n"
-    "- Typography (font sizes, weights, contrast)\n"
-    "- Missing or extra elements\n\n"
-    "Then output an improved version.\n"
-    "Format: <think>[comparison reasoning]</think><code>[corrected HTML/CSS]</code>"
+    "You are a high-fidelity UI reproduction expert. You are given a reference widget screenshot "
+    "and your previous React+Tailwind attempt. Compare carefully against the reference and fix:\n"
+    "- Layout misalignment (flex/grid direction, spacing, padding, gaps)\n"
+    "- Wrong or missing colors (use exact hex values via `bg-[#hex]` syntax)\n"
+    "- Typography differences (text size, font weight, leading)\n"
+    "- Missing or incorrect text content (must be character-perfect)\n"
+    "- Missing elements (icons from lucide-react, borders, shadows, dividers)\n"
+    "- Charts: use recharts components\n\n"
+    "Format: <think>[comparison reasoning]</think><code>[corrected React component]</code>"
 )
 
 
-def polish(model, tokenizer, ref_image: bytes, initial_html: str, rounds: int = 3) -> list[tuple[str, float]]:
-    """
-    Iteratively refine HTML code over N rounds.
-    Returns list of (html, score) for each round.
-    """
-    current_html = initial_html
+def polish(model, processor, image_path: str, ref_image: bytes, initial_tsx: str,
+           rounds: int = 3) -> list[tuple[str, float]]:
+    """Iteratively refine TSX code over N rounds."""
+    current_tsx = initial_tsx
     history = []
 
-    initial_score = compute_reward_code(ref_image, current_html)
-    history.append((current_html, initial_score))
+    initial_score = compute_reward_code(ref_image, current_tsx)
+    history.append((current_tsx, initial_score))
     print(f"  Round 0 (initial): score={initial_score:.4f}")
 
+    w, h = _get_image_size(image_path)
+
     for r in range(rounds):
-        # build polishing prompt with the current code
-        prompt = (
-            POLISH_PROMPT + "\n\n"
-            f"Previous HTML code:\n```html\n{current_html}\n```\n\n"
-            "Generate an improved version that more closely matches the reference."
-        )
+        # build polishing prompt with reference image + current code
+        messages = [
+            {"role": "system", "content": [{"type": "text", "text": POLISH_PROMPT}]},
+            {"role": "user", "content": [
+                {"type": "image", "url": image_path},
+                {"type": "text", "text": f"Widget dimensions: {w}x{h}px.\n\nHere is my previous React component attempt:\n```tsx\n{current_tsx}\n```\n\nImprove it to better match the reference widget."},
+            ]},
+        ]
+        inputs = processor.apply_chat_template(
+            messages, tokenize=True, add_generation_prompt=True,
+            return_dict=True, return_tensors="pt"
+        ).to(model.device)
 
-        text = generate(model, tokenizer, prompt, temperature=0.5)
-        html = extract_code(text)
+        with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.bfloat16):
+            output = model.generate(**inputs, max_new_tokens=2048, temperature=0.5, do_sample=True)
+        prompt_len = inputs["input_ids"].shape[1]
+        text = processor.tokenizer.decode(output[0][prompt_len:], skip_special_tokens=True)
 
-        if html is None:
+        tsx = extract_code(text)
+        if tsx is None:
             print(f"  Round {r+1}: no <code> block, keeping previous version")
             history.append(history[-1])
             continue
 
-        score = compute_reward_code(ref_image, html)
+        score = compute_reward_code(ref_image, tsx)
         print(f"  Round {r+1}: score={score:.4f}")
 
-        # only keep if it improved
         if score > history[-1][1]:
-            current_html = html
-            history.append((html, score))
+            current_tsx = tsx
+            history.append((tsx, score))
         else:
             print(f"    -> no improvement, keeping previous version")
             history.append(history[-1])
@@ -74,44 +71,34 @@ def polish(model, tokenizer, ref_image: bytes, initial_html: str, rounds: int = 
     return history
 
 
-def generate_with_polish(model, tokenizer, ref_image: bytes, n: int = 4,
-                         polish_rounds: int = 3) -> tuple[str, float]:
-    """
-    Phase 3.3 combined strategy:
-    1. Generate N candidates (best-of-N)
-    2. Select best candidate
-    3. Run M polishing rounds on the best
-    """
-    prompt = SYSTEM_PROMPT + "\nRecreate the widget shown in the reference image."
-
-    # Step 1-2: best-of-N
-    html, score = best_of_n(model, tokenizer, prompt, ref_image, n=n)
-    if html is None:
+def generate_with_polish(model, processor, image_path: str, ref_image: bytes,
+                         n: int = 4, polish_rounds: int = 3) -> tuple[str, float]:
+    """Combined: best-of-N then polish the winner."""
+    tsx, score = best_of_n(model, processor, image_path, ref_image, n=n)
+    if tsx is None:
         return None, 0.0
     print(f"Best-of-{n} score: {score:.4f}")
 
-    # Step 3: polish
-    history = polish(model, tokenizer, ref_image, html, rounds=polish_rounds)
+    history = polish(model, processor, image_path, ref_image, tsx, rounds=polish_rounds)
     return history[-1]
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-1.5B")
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--image", type=str, required=True)
-    parser.add_argument("--n", type=int, default=4, help="Best-of-N candidates")
-    parser.add_argument("--rounds", type=int, default=3, help="Polishing rounds")
+    parser.add_argument("--n", type=int, default=4)
+    parser.add_argument("--rounds", type=int, default=3)
     args = parser.parse_args()
 
-    model, tokenizer = load_model(args.model_name, args.checkpoint)
+    model, processor = load_model(args.checkpoint)
 
     with open(args.image, "rb") as f:
         ref_image = f.read()
 
-    html, score = generate_with_polish(model, tokenizer, ref_image, n=args.n, polish_rounds=args.rounds)
-    if html:
+    tsx, score = generate_with_polish(model, processor, args.image, ref_image, n=args.n, polish_rounds=args.rounds)
+    if tsx:
         print(f"\nFinal score: {score:.4f}")
-        print(html)
+        print(tsx)
     else:
         print("Generation failed.")
