@@ -28,7 +28,7 @@ def main():
         train_data = json.load(f)
 
     sft_prompts = [s["prompt"] for s in train_data]
-    sft_code_gt = [s["html"] for s in train_data]
+    sft_code_gt = [s["react_code"] for s in train_data]
     grpo_prompts = [s["prompt"] for s in train_data]
 
     # load target images for GRPO reward

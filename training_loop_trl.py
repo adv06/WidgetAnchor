@@ -1,7 +1,7 @@
 from trl import GRPOConfig, GRPOTrainer
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig
-from reward import compute_reward_code
+from reward.programmatic import compute_reward_code
 
 
 model_name = "Qwen/Qwen2.5-7B"

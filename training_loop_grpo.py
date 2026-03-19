@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import os
-from reward import compute_reward_code
+from reward.programmatic import compute_reward_code
 from einops import rearrange
 from peft import set_peft_model_state_dict, get_peft_model_state_dict
 from copy import deepcopy
@@ -59,7 +59,7 @@ def run_grpo(model, tokenizer, prompts, ground_truths, model_name="Qwen/Qwen2.5-
                 completion_length = len(completion_ids)
                 completion_lengths.append(completion_length)
                 text = tokenizer.decode(completion_ids, skip_special_tokens=True)
-                score = compute_reward_code(ground_truths[idxs[b]], text) # ground_truths[idx] is target image bytes, text is generated HTML
+                score = compute_reward_code(ground_truths[idxs[b]], text) # ground_truths[idx] is target image bytes, text is generated React code
                 raw_scores.append(score)
                 completion_interim.append(score)
                 generations.append(full_ids.clone())
