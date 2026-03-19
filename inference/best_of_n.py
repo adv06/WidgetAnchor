@@ -1,5 +1,6 @@
 # Usage: python -m inference.best_of_n --checkpoint /shared/advey/checkpoints/grpo_final --image widget.png --n 4
 
+# take n generations, get best
 import argparse
 from inference.generate import load_model, generate, extract_code
 from reward.programmatic import compute_reward_code

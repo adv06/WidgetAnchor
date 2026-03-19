@@ -1,6 +1,4 @@
 """
-Phase 0.2 (Step 4): Deduplication.
-
 Perceptual hashing (dHash) on screenshots to remove near-duplicates.
 Uses multi-probe bucketing to avoid O(n^2) comparisons.
 
@@ -17,7 +15,7 @@ from collections import defaultdict
 
 
 def compute_dhash(image_bytes: bytes, hash_size: int = 16) -> np.ndarray:
-    """Compute difference hash of an image."""
+    # Compute difference hash of an image
     img = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
     resized = cv2.resize(img, (hash_size + 1, hash_size))
     diff = resized[:, 1:] > resized[:, :-1]
@@ -25,7 +23,7 @@ def compute_dhash(image_bytes: bytes, hash_size: int = 16) -> np.ndarray:
 
 
 def hash_to_int(h: np.ndarray) -> int:
-    """Convert boolean hash array to integer for bucketing."""
+    # Convert boolean hash array to integer for bucketing.
     result = 0
     for bit in h:
         result = (result << 1) | int(bit)

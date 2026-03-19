@@ -1,6 +1,4 @@
 """
-Phase 0.1 (Step 1b): Generate synthetic widget training data from scratch.
-
 Uses GPT-4o to generate React+Tailwind TSX components for random widget categories,
 then renders them to screenshots. Mirrors the UI2Code "reversed" strategy.
 

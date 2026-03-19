@@ -1,6 +1,4 @@
 """
-Phase 0.2 (Step 5): Difficulty tagging.
-
 Tag each sample as simple/medium/complex based on TSX token count.
 - Simple: <50 tokens
 - Medium: 50-200 tokens

@@ -59,7 +59,7 @@ training_args = GRPOConfig(
 #     "prompt": ["Generate an HTML button with blue background", ...],
 #     "ground_truth": ["<button style='background:blue'>Click</button>", ...]
 # })
-dataset = None  # replace with your dataset
+dataset = None  # broken
 
 trainer = GRPOTrainer(
     model=model,

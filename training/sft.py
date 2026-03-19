@@ -60,10 +60,10 @@ def selective_log_softmax(logits, targets):
 
 
 def run_sft(model, processor, samples, training_steps=1000, lr=1e-4, save_dir="/shared/advey", device=torch.device("cuda:0")):
-    """
-        - screenshot_path: path to widget screenshot
-        - cot: target output (<think>...</think><code>...</code>)
-    """
+    
+     #   - screenshot_path: path to widget screenshot
+     #   - cot: target output (<think>...</think><code>...</code>) 
+    
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=100, num_training_steps=training_steps)
     loss_history = []
@@ -97,7 +97,8 @@ def run_sft(model, processor, samples, training_steps=1000, lr=1e-4, save_dir="/
 
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             logits = model(**inputs).logits[:, prompt_len-1:-1, :]
-            target_ids = inputs["input_ids"][:, prompt_len:]
+            target_ids = inputs["input_ids"][:, prompt_len:] # shift by 1, logits --> token ids
+            # einops rearrange is goated
             loss = F.cross_entropy(rearrange(logits, "B T D -> (B T) D"), rearrange(target_ids, "B T -> (B T)")) # cross entropy, already does mean and softmax internally
 
         loss.backward()

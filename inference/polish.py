@@ -1,5 +1,6 @@
 # Usage: python -m inference.polish --checkpoint /shared/advey/checkpoints/grpo_final --image widget.png --rounds 3
 
+# continuous refinement
 import argparse
 from inference.generate import load_model, extract_code
 from inference.best_of_n import best_of_n

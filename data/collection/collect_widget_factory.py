@@ -1,7 +1,6 @@
 """
-Phase 0.1 + 0.2 (Step 1-2): Collect widget screenshots from widget-factory,
-reverse-engineer self-contained HTML/CSS using a SOTA LLM.
 
+reverse-engineer self-contained HTML/CSS using a SOTA LLM.
 Usage:
     python -m data.collection.collect_widget_factory --num_samples 50000 --output_dir ./data/raw
     python -m data.collection.collect_widget_factory --num_samples 100 --output_dir ./data/raw  # test run

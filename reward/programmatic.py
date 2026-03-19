@@ -36,7 +36,7 @@ def _get_browser():
 
 
 def render_tsx_to_image(tsx_code: str, width=800, height=600) -> bytes:
-    """Render a React+Tailwind TSX component to a PNG screenshot via esbuild + Playwright."""
+    # Render a React+Tailwind TSX component to a PNG screenshot via esbuild + Playwright.
     tmp_dir = tempfile.mkdtemp(prefix="widget_render_")
     try:
         # write the user's component
@@ -187,7 +187,7 @@ def compute_palette_distance(img1: np.array, img2: np.array):
     img2 = cv2.cvtColor(img2, cv2.COLOR_BGR2LAB).reshape(-1, 3).astype(float) # remember -1 means figure this dimension out automatically
     k = 5
     labels1 = KMeans(n_clusters=k, random_state=0, n_init=10).fit(img1).cluster_centers_
-    labels2 = KMeans(n_clusters=k, random_state=0, n_init=10).fit(img2).cluster_centers_
+    labels2 = KMeans(n_clusters=k, random_state=0, n_init=10).fit(img2).cluster_centers_ # k means, cluster centers is the different palette colors (K, 3) i think..
     D = cdist(labels1, labels2)
     row_ind, col_ind = linear_sum_assignment(D)
     
@@ -275,7 +275,7 @@ def compute_layout_score(ref_tsx: str, gen_tsx: str, width=800, height=600) -> f
             yup = max(gen_boxes[i]['y'], ref_boxes[j]['y'])
             xright = min(gen_boxes[i]['x']+gen_boxes[i]['width'], ref_boxes[j]['x']+ref_boxes[j]['width'])
             ydown = min(gen_boxes[i]['y']+gen_boxes[i]['height'], ref_boxes[j]['y']+ref_boxes[j]['height'])
-            inter = max(xright-xleft, 0) * max(ydown-yup, 0)
+            inter = max(xright-xleft, 0) * max(ydown-yup, 0) # think about it this is just intersecting rectangle
             union = gen_boxes[i]['width']*gen_boxes[i]['height'] + ref_boxes[j]['width'] * ref_boxes[j]['height'] - inter 
             IoU[i][j] = inter / union if union > 0 else 0 
     IoU = np.array(IoU)
