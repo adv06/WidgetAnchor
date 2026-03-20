@@ -98,7 +98,7 @@ def run_grpo(model, processor, screenshot_paths, ref_tsx_list=None, model_name="
                 texts.append(text)
                 generations.append(full_ids.clone())
 
-            # sequential rendering — Playwright browser instance is not thread-safe
+            # sequential rendering Playwright browser instance is not thread-safe
             candidate_images = [_render_candidate(t) for t in texts]
 
             # load reference image and tsx for reward
