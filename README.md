@@ -1,3 +1,5 @@
+training / proper data collection is pending ... 
+
 # WidgetAnchor
 
 Fine-tunes GLM-4.1V-9B-Thinking (a 9B-param VLM) with LoRA to reverse-engineer UI widgets: screenshot → React+Tailwind TSX component. Pipeline: data collection → SFT → GRPO → inference → evaluation.
