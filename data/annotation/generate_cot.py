@@ -81,8 +81,9 @@ def process_one(path: str, output_dir: str, model: str) -> dict | None:
     try:
         cot_output = generate_cot(sample["screenshot_path"], sample["tsx"], model=model)
 
-        # validate that output has both <think> and <code> tags
-        if "<think>" not in cot_output or "<code>" not in cot_output:
+        # validate that output has properly closed <think> and <code> blocks
+        if "<think>" not in cot_output or "</think>" not in cot_output \
+                or "<code>" not in cot_output or "</code>" not in cot_output:
             print(f"  Bad format for {widget_id}, skipping")
             return None
 

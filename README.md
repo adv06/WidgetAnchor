@@ -94,10 +94,10 @@ python -m training.run_grpo_only
 
 ```bash
 # Single-shot
-python -m inference.generate --image_path widget.png
+python -m inference.generate --checkpoint /path/to/checkpoint --image widget.png
 
 # Best-of-N + iterative polish
-python -m inference.polish --image_path widget.png
+python -m inference.polish --checkpoint /path/to/checkpoint --image widget.png
 ```
 
 ### 4. Evaluate

@@ -41,12 +41,22 @@ def run_benchmark(checkpoint: str, model_name: str, gt_dir: str, output_dir: str
     widget_images = sorted(glob.glob(os.path.join(gt_dir, "**", "*.png"), recursive=True))
     print(f"Found {len(widget_images)} benchmark widgets in {gt_dir}")
 
-    results = []
+    # load existing results for resume
+    summary_path = os.path.join(output_dir, "results_summary.json")
+    if os.path.exists(summary_path):
+        with open(summary_path) as f:
+            results = json.load(f)
+        seen_ids = {r["widget_id"] for r in results}
+    else:
+        results = []
+        seen_ids = set()
+
     for i, img_path in enumerate(widget_images):
         widget_id = os.path.splitext(os.path.basename(img_path))[0]
         tsx_out_path = os.path.join(output_dir, f"{widget_id}.tsx")
 
-        if os.path.exists(tsx_out_path):
+        png_out_path = os.path.join(output_dir, f"{widget_id}.png")
+        if os.path.exists(tsx_out_path) and os.path.exists(png_out_path) and widget_id in seen_ids:
             continue
 
         print(f"[{i+1}/{len(widget_images)}] {widget_id}")
@@ -73,11 +83,10 @@ def run_benchmark(checkpoint: str, model_name: str, gt_dir: str, output_dir: str
             # render and save screenshot
             try:
                 rendered = render_tsx_to_image(tsx)
-                png_path = os.path.join(output_dir, f"{widget_id}.png")
-                with open(png_path, "wb") as f:
+                with open(png_out_path, "wb") as f:
                     f.write(rendered)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"  Render failed: {e}")
 
             results.append({"widget_id": widget_id, "score": score})
 

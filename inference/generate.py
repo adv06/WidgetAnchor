@@ -44,7 +44,12 @@ def generate(model, processor, image_path: str, temperature: float = 0.7, max_ne
 
 def extract_code(text: str) -> str | None:
     match = re.search(r"<code>(.*?)</code>", text, re.DOTALL)
-    return match.group(1).strip() if match else None
+    if match is None:
+        return None
+    code = match.group(1).strip()
+    # fix escaped sequences from tokenizer decode
+    code = code.replace("\\n", "\n").replace("\\'", "'").replace('\\"', '"')
+    return code
 
 
 if __name__ == "__main__":

@@ -293,10 +293,11 @@ def compute_reward_code(target_image: bytes, generated_tsx: str, rendered_image:
     polarity_score = 0.0
     layout_score = 0.0
 
-    try:
-        if rendered_image is None:
-            rendered_image = render_tsx_to_image(generated_tsx)
+    # render if needed — let render failures propagate so callers can handle them
+    if rendered_image is None:
+        rendered_image = render_tsx_to_image(generated_tsx)
 
+    try:
         # decode both images to numpy for functions that need arrays
         ref_np = cv2.imdecode(np.frombuffer(target_image, dtype=np.uint8), cv2.IMREAD_COLOR)
         gen_np = cv2.imdecode(np.frombuffer(rendered_image, dtype=np.uint8), cv2.IMREAD_COLOR)
@@ -313,8 +314,10 @@ def compute_reward_code(target_image: bytes, generated_tsx: str, rendered_image:
 
         if ref_tsx is not None:
             layout_score = compute_layout_score(ref_tsx, generated_tsx)
-    except Exception:
-        pass
+    except Exception as e:
+        import sys
+        print(f"[reward] metric computation failed: {e}", file=sys.stderr)
+        return 0.0
 
     if ref_tsx is not None:
         return (0.15 * ssim_score +

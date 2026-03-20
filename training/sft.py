@@ -64,6 +64,7 @@ def run_sft(model, processor, samples, training_steps=1000, lr=1e-4, save_dir="/
      #   - screenshot_path: path to widget screenshot
      #   - cot: target output (<think>...</think><code>...</code>) 
     
+    model.train()
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=100, num_training_steps=training_steps)
     loss_history = []

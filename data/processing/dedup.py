@@ -37,7 +37,7 @@ def hamming_distance(h1: np.ndarray, h2: np.ndarray) -> int:
 def dedup(input_dir: str, output_dir: str, hash_threshold: int = 8):
     os.makedirs(output_dir, exist_ok=True)
 
-    verified_files = sorted(glob.glob(os.path.join(input_dir, "widget-*.json")))
+    verified_files = sorted(glob.glob(os.path.join(input_dir, "*.json")))
     print(f"Found {len(verified_files)} verified samples")
 
     # compute hashes

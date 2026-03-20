@@ -22,6 +22,8 @@ def _render_candidate(text):
     code_match = re.search(r"<code>(.*?)</code>", text, re.DOTALL)
     if code_match:
         tsx = code_match.group(1)
+        # fix escaped sequences from tokenizer decode
+        tsx = tsx.replace("\\n", "\n").replace("\\'", "'").replace('\\"', '"')
         try:
             return (render_tsx_to_image(tsx), tsx)
         except Exception:
@@ -89,14 +91,15 @@ def run_grpo(model, processor, screenshot_paths, ref_tsx_list=None, model_name="
                 # reconstruct full token sequence (prompt + completion) for HF model forward pass
                 full_ids = gen_out.sequences[j]
                 completion_ids = full_ids[prompt_len:]
-                completion_lengths.append(len(completion_ids))
+                eos_positions = (completion_ids == PAD_TOKEN_ID).nonzero(as_tuple=True)[0]
+                real_len = eos_positions[0].item()+1 if len(eos_positions) >0 else len(completion_ids)
+                completion_lengths.append(real_len)
                 text = tokenizer.decode(completion_ids, skip_special_tokens=True)
                 texts.append(text)
                 generations.append(full_ids.clone())
 
-            # parallel Playwright rendering — each candidate rendered concurrently
-            with ThreadPoolExecutor(max_workers=n) as pool:
-                candidate_images = list(pool.map(_render_candidate, texts))
+            # sequential rendering — Playwright browser instance is not thread-safe
+            candidate_images = [_render_candidate(t) for t in texts]
 
             # load reference image and tsx for reward
             with open(screenshot_paths[idxs[b]], "rb") as f:

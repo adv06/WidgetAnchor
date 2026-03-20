@@ -168,7 +168,8 @@ def generate(num_samples: int, output_dir: str, model: str = "gpt-4o", workers: 
 
     random.seed(42)
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
+    # sequential rendering — Playwright browser instance is not thread-safe
+    with ThreadPoolExecutor(max_workers=min(workers, 1)) as pool:
         futures = {pool.submit(process_one, i, output_dir, model): i for i in range(num_samples)}
         for i, future in enumerate(as_completed(futures)):
             result = future.result()
