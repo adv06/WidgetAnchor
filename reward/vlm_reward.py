@@ -1,42 +1,51 @@
 import base64
 import re
-from openai import OpenAI
+from google import genai
+from google.genai import types
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
-def compute_vlm_reward(ref_image: bytes, rendered_image: bytes, model: str = "gpt-4o") -> dict:
+def _get_client():
+    return genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+
+
+def compute_vlm_reward(ref_image: bytes, rendered_image: bytes, model: str = "gemini-3-flash-preview") -> dict:
     """
     Decomposed VLM scoring, asks for 4 separate dimension scores instead of
     one holistic number. This is our improvement over UI2Code^N's single score.
     """
-    client = OpenAI()
-    img1 = base64.b64encode(ref_image).decode()
-    img2 = base64.b64encode(rendered_image).decode()
+    client = _get_client()
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": (
-                    "You will be given two images:\n"
-                    "- Image 1: the reference widget (target design)\n"
-                    "- Image 2: a code rendering generated from the reference\n\n"
-                    "Score EACH dimension independently (0-100):\n"
-                    "1. Layout fidelity (positions, sizes, spacing, alignment)\n"
-                    "2. Color accuracy (palette match, vibrancy, dark/light mode correctness)\n"
-                    "3. Typography fidelity (font sizes, weights, contrast, readability)\n"
-                    "4. Overall visual similarity\n\n"
-                    "Strictly output in this format:\n"
-                    "\\boxed{layout: X, color: Y, typo: Z, overall: W}"
-                )},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img1}"}},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img2}"}}
-            ]
-        }],
-        temperature=0.0,
+    prompt = (
+        "You will be given two images:\n"
+        "- Image 1: the reference widget (target design)\n"
+        "- Image 2: a code rendering generated from the reference\n\n"
+        "Score EACH dimension independently (0-100):\n"
+        "1. Layout fidelity (positions, sizes, spacing, alignment)\n"
+        "2. Color accuracy (palette match, vibrancy, dark/light mode correctness)\n"
+        "3. Typography fidelity (font sizes, weights, contrast, readability)\n"
+        "4. Overall visual similarity\n\n"
+        "Strictly output in this format:\n"
+        "\\boxed{layout: X, color: Y, typo: Z, overall: W}"
     )
 
-    text = response.choices[0].message.content.strip()
+    response = client.models.generate_content(
+        model=model,
+        contents=[
+            prompt,
+            types.Part.from_bytes(data=ref_image, mime_type="image/png"),
+            types.Part.from_bytes(data=rendered_image, mime_type="image/png"),
+        ],
+        config=types.GenerateContentConfig(
+            max_output_tokens=256,
+            thinking_config=types.ThinkingConfig(thinking_budget=0),
+        ),
+    )
+
+    text = response.text.strip()
     scores = _parse_decomposed_scores(text)
 
     # weighted combination — color weighted high because style is our weakest area
@@ -48,46 +57,45 @@ def compute_vlm_reward(ref_image: bytes, rendered_image: bytes, model: str = "gp
 
 
 def compute_vlm_comparison(ref_image: bytes, candidate_a: bytes, candidate_b: bytes,
-                           model: str = "gpt-4o") -> tuple[dict, dict, str]:
+                           model: str = "gemini-3-flash-preview") -> tuple[dict, dict, str]:
     """
     Pairwise VLM comparison for round-robin ranking.
     Returns (scores_a, scores_b, winner) where winner is "A", "B", or "tie".
     """
-    client = OpenAI()
-    img_ref = base64.b64encode(ref_image).decode()
-    img_a = base64.b64encode(candidate_a).decode()
-    img_b = base64.b64encode(candidate_b).decode()
+    client = _get_client()
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": (
-                    "You will be given three images:\n"
-                    "- Image 1: the reference widget (target design)\n"
-                    "- Image 2: candidate A rendering\n"
-                    "- Image 3: candidate B rendering\n\n"
-                    "For each candidate, score these dimensions (0-100):\n"
-                    "1. Layout fidelity\n"
-                    "2. Color accuracy\n"
-                    "3. Typography fidelity\n"
-                    "4. Overall similarity\n\n"
-                    "Then state which candidate is closer to the reference.\n\n"
-                    "Output format:\n"
-                    "Candidate A: layout=X, color=Y, typo=Z, overall=W\n"
-                    "Candidate B: layout=X, color=Y, typo=Z, overall=W\n"
-                    "\\boxed{Candidate A is better} or \\boxed{Candidate B is better} or \\boxed{Tie}"
-                )},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_ref}"}},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_a}"}},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b}"}}
-            ]
-        }],
-        temperature=0.0,
+    prompt = (
+        "You will be given three images:\n"
+        "- Image 1: the reference widget (target design)\n"
+        "- Image 2: candidate A rendering\n"
+        "- Image 3: candidate B rendering\n\n"
+        "For each candidate, score these dimensions (0-100):\n"
+        "1. Layout fidelity\n"
+        "2. Color accuracy\n"
+        "3. Typography fidelity\n"
+        "4. Overall similarity\n\n"
+        "Then state which candidate is closer to the reference.\n\n"
+        "Output format:\n"
+        "Candidate A: layout=X, color=Y, typo=Z, overall=W\n"
+        "Candidate B: layout=X, color=Y, typo=Z, overall=W\n"
+        "\\boxed{Candidate A is better} or \\boxed{Candidate B is better} or \\boxed{Tie}"
     )
 
-    text = response.choices[0].message.content.strip()
+    response = client.models.generate_content(
+        model=model,
+        contents=[
+            prompt,
+            types.Part.from_bytes(data=ref_image, mime_type="image/png"),
+            types.Part.from_bytes(data=candidate_a, mime_type="image/png"),
+            types.Part.from_bytes(data=candidate_b, mime_type="image/png"),
+        ],
+        config=types.GenerateContentConfig(
+            max_output_tokens=512,
+            thinking_config=types.ThinkingConfig(thinking_budget=0),
+        ),
+    )
+
+    text = response.text.strip()
     scores_a, scores_b, winner = _parse_comparison(text)
     return scores_a, scores_b, winner
 

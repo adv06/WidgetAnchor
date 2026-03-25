@@ -22,7 +22,7 @@ def load_model(checkpoint_path: str, model_name: str = MODEL_NAME, device: str =
     return model, processor
 
 
-def generate(model, processor, image_path: str, temperature: float = 0.7, max_new_tokens: int = 2048) -> str:
+def generate(model, processor, image_path: str, temperature: float = 0.7, max_new_tokens: int = 3072) -> str:
     messages = [
         {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT}]},
         {"role": "user", "content": _user_message(image_path)},
@@ -42,13 +42,23 @@ def generate(model, processor, image_path: str, temperature: float = 0.7, max_ne
     return text
 
 
+def _unwrap_chat_template(text: str) -> str:
+    """Extract raw text from chat template dict format if present."""
+    match = re.search(r"\[?\{['\"]type['\"]:\s*['\"]text['\"],\s*['\"]text['\"]:\s*['\"](.+)", text, re.DOTALL)
+    if match:
+        inner = match.group(1)
+        inner = inner.replace("\\'", "'").replace('\\"', '"').replace("\\n", "\n")
+        inner = re.sub(r"['\"]?\s*\}?\]?\s*$", "", inner)
+        return inner
+    return text
+
+
 def extract_code(text: str) -> str | None:
+    text = _unwrap_chat_template(text)
     match = re.search(r"<code>(.*?)</code>", text, re.DOTALL)
     if match is None:
         return None
     code = match.group(1).strip()
-    # fix escaped sequences from tokenizer decode
-    code = code.replace("\\n", "\n").replace("\\'", "'").replace('\\"', '"')
     return code
 
 

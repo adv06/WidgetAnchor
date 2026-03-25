@@ -3,7 +3,7 @@ from reward.vlm_reward import compute_vlm_reward
 
 
 def compute_composite_reward(ref_image: bytes, generated_tsx: str,
-                             model: str = "gpt-4o") -> dict:
+                             model: str = "gemini-3-flash-preview") -> dict:
     # render once, pass to both scorers
     rendered_image = render_tsx_to_image(generated_tsx)
 

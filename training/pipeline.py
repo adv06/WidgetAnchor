@@ -12,7 +12,7 @@ def main():
 
     data_dir = "./output/final"
     save_dir = "/shared/advey"
-    device = torch.device("cuda:0")
+    device = torch.device("cuda:0")  # use CUDA_VISIBLE_DEVICES to select physical GPU
 
     os.makedirs(f"{save_dir}/checkpoints", exist_ok=True)
     os.makedirs(f"{save_dir}/plots", exist_ok=True)
@@ -53,7 +53,14 @@ def main():
     print(f"Phase 1: Supervised Fine-Tuning ({MODEL_NAME})")
     print("=" * 60)
 
-    model = run_sft(model, processor, train_data, training_steps=500, lr=1e-4, save_dir=save_dir, device=device)
+    # scale training steps with dataset size
+    num_samples = len(train_data)
+    sft_steps = max(500, num_samples * 3)  # ~3 epochs over data
+    grpo_steps = max(400, num_samples * 2)  # ~2 epochs
+
+    print(f"Training data: {num_samples} samples")
+    print(f"SFT steps: {sft_steps} | GRPO steps: {grpo_steps}")
+    model = run_sft(model, processor, train_data, training_steps=sft_steps, lr=1e-4, save_dir=save_dir, device=device)
     model.save_pretrained(f"{save_dir}/checkpoints/sft_final")
     print("SFT complete.\n")
 
@@ -63,8 +70,8 @@ def main():
     print("=" * 60)
 
     model = run_grpo(model, processor, screenshot_paths, ref_tsx_list=ref_tsx_list, model_name=MODEL_NAME,
-                     training_steps=1000, lr=1e-5, n=3, batch_size=2, num_epochs=4,
-                     save_dir=save_dir, device=device, use_vlm_reward=False)  # start with programmatic-only, switch to True later
+                     training_steps=grpo_steps, lr=1e-5, n=4, batch_size=1, num_epochs=4,
+                     save_dir=save_dir, device=device, use_vlm_reward=False)
     model.save_pretrained(f"{save_dir}/checkpoints/grpo_final")
     print("GRPO complete. Final model saved.")
 

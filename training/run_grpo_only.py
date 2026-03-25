@@ -14,7 +14,7 @@ def main():
 
     data_dir = "./output/final"
     save_dir = "/shared/advey"
-    device = torch.device("cuda:0")
+    device = torch.device("cuda:0")  # use CUDA_VISIBLE_DEVICES to select physical GPU
 
     with open(f"{data_dir}/train.json") as f:
         train_data = json.load(f)
@@ -35,7 +35,7 @@ def main():
     print("=" * 60)
 
     model = run_grpo(model, processor, screenshot_paths, ref_tsx_list=ref_tsx_list, model_name=MODEL_NAME,
-                     training_steps=1000, lr=5e-6, n=3, batch_size=2, num_epochs=2,
+                     training_steps=400, lr=1e-5, n=2, batch_size=1, num_epochs=4,
                      save_dir=save_dir, device=device, use_vlm_reward=False)
     model.save_pretrained(f"{save_dir}/checkpoints/grpo_final")
     print("GRPO complete. Final model saved.")

@@ -85,10 +85,10 @@ def run_benchmark(checkpoint: str, model_name: str, gt_dir: str, output_dir: str
                 rendered = render_tsx_to_image(tsx)
                 with open(png_out_path, "wb") as f:
                     f.write(rendered)
+                results.append({"widget_id": widget_id, "score": score})
             except Exception as e:
                 print(f"  Render failed: {e}")
-
-            results.append({"widget_id": widget_id, "score": score})
+                # don't append to results — no PNG means resume will retry
 
         except Exception as e:
             print(f"  Error: {e}")

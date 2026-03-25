@@ -11,13 +11,13 @@ import os
 import random
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from openai import OpenAI
+from google import genai
+from google.genai import types
 from dotenv import load_dotenv
-from reward.programmatic import render_tsx_to_image
 
 load_dotenv()
 
-client = OpenAI()
+client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
 WIDGET_CATEGORIES = [
     "dashboard stats card",
@@ -92,7 +92,7 @@ def strip_code_fences(code: str) -> str:
     return code.strip()
 
 
-def generate_widget(category: str, style: str, density: str, layout: str, model: str = "gpt-4o") -> str:
+def generate_widget(category: str, style: str, density: str, layout: str, model: str = "gemini-3-flash-preview") -> str:
     prompt = (
         f"Create a {category} widget.\n"
         f"Style: {style}\n"
@@ -101,20 +101,20 @@ def generate_widget(category: str, style: str, density: str, layout: str, model:
         f"Make it visually complete and realistic with sample data."
     )
 
-    response = client.chat.completions.create(
+    response = client.models.generate_content(
         model=model,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.9,
-        max_tokens=4096,
+        contents=SYSTEM_PROMPT + "\n\n" + prompt,
+        config=types.GenerateContentConfig(
+            max_output_tokens=4096,
+            thinking_config=types.ThinkingConfig(thinking_budget=0),
+        ),
     )
-    code = response.choices[0].message.content.strip()
+    code = response.text.strip()
     return strip_code_fences(code)
 
 
-def process_one(sample_id: int, output_dir: str, model: str) -> dict | None:
+def generate_one(sample_id: int, output_dir: str, model: str = "gemini-3-flash-preview") -> dict | None:
+    """Generate TSX via API (thread-safe). Rendering is deferred to render_verify."""
     widget_id = f"synthetic-{sample_id:05d}"
     output_path = os.path.join(output_dir, f"{widget_id}.json")
 
@@ -132,19 +132,11 @@ def process_one(sample_id: int, output_dir: str, model: str) -> dict | None:
         if "export default" not in tsx:
             return None
 
-        # Render to screenshot
-        screenshots_dir = os.path.join(output_dir, "screenshots")
-        screenshot_path = os.path.join(screenshots_dir, f"{widget_id}.png")
-
-        png_bytes = render_tsx_to_image(tsx)
-        with open(screenshot_path, "wb") as f:
-            f.write(png_bytes)
-
         result = {
             "widget_id": widget_id,
-            "screenshot_path": screenshot_path,
             "tsx": tsx,
             "category": category,
+            "needs_render": True,
         }
 
         with open(output_path, "w") as f:
@@ -156,7 +148,48 @@ def process_one(sample_id: int, output_dir: str, model: str) -> dict | None:
         return None
 
 
-def generate(num_samples: int, output_dir: str, model: str = "gpt-4o", workers: int = 8):
+def render_batch(output_dir: str):
+    """Render screenshots for all synthetic samples that need it (sequential, Playwright not thread-safe)."""
+    from reward.programmatic import render_tsx_to_image
+
+    screenshots_dir = os.path.join(output_dir, "screenshots")
+    os.makedirs(screenshots_dir, exist_ok=True)
+
+    json_files = sorted([f for f in os.listdir(output_dir) if f.startswith("synthetic-") and f.endswith(".json")])
+    rendered = 0
+    failed = 0
+
+    for jf in json_files:
+        path = os.path.join(output_dir, jf)
+        with open(path) as f:
+            sample = json.load(f)
+
+        screenshot_path = os.path.join(screenshots_dir, f"{sample['widget_id']}.png")
+
+        if os.path.exists(screenshot_path) and "screenshot_path" in sample:
+            continue
+
+        try:
+            png_bytes = render_tsx_to_image(sample["tsx"])
+            with open(screenshot_path, "wb") as f:
+                f.write(png_bytes)
+
+            sample["screenshot_path"] = os.path.abspath(screenshot_path)
+            sample.pop("needs_render", None)
+            with open(path, "w") as f:
+                json.dump(sample, f)
+            rendered += 1
+        except Exception as e:
+            print(f"  Render failed {sample['widget_id']}: {e}")
+            failed += 1
+
+        if (rendered + failed) % 100 == 0:
+            print(f"  Rendered: {rendered} | failed: {failed} / {rendered + failed}")
+
+    print(f"Rendering done: {rendered} succeeded, {failed} failed")
+
+
+def generate(num_samples: int, output_dir: str, model: str = "gemini-3-flash-preview", workers: int = 8):
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(os.path.join(output_dir, "screenshots"), exist_ok=True)
 
@@ -168,9 +201,10 @@ def generate(num_samples: int, output_dir: str, model: str = "gpt-4o", workers: 
 
     random.seed(42)
 
-    # sequential rendering — Playwright browser instance is not thread-safe
-    with ThreadPoolExecutor(max_workers=min(workers, 1)) as pool:
-        futures = {pool.submit(process_one, i, output_dir, model): i for i in range(num_samples)}
+    # Phase 1: parallel API calls (thread-safe)
+    print(f"Phase 1: Generating TSX via API ({workers} workers)...")
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(generate_one, i, output_dir, model): i for i in range(num_samples)}
         for i, future in enumerate(as_completed(futures)):
             result = future.result()
             if result is not None:
@@ -184,7 +218,12 @@ def generate(num_samples: int, output_dir: str, model: str = "gpt-4o", workers: 
             if (i + 1) % 50 == 0:
                 print(f"  Progress: {i+1}/{num_samples} | succeeded: {succeeded} | failed: {failed}")
 
-    print(f"\nDone! {succeeded} succeeded, {failed} failed")
+    print(f"\nAPI generation done: {succeeded} succeeded, {failed} failed")
+
+    # Phase 2: sequential rendering (Playwright not thread-safe)
+    print(f"Phase 2: Rendering screenshots (sequential)...")
+    render_batch(output_dir)
+
     print(f"Synthetic data saved to {output_dir}/")
 
 
@@ -192,7 +231,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--num_samples", type=int, default=10000)
     parser.add_argument("--output_dir", type=str, default="./output/raw")
-    parser.add_argument("--model", type=str, default="gpt-4o")
+    parser.add_argument("--model", type=str, default="gemini-3-flash-preview")
     parser.add_argument("--workers", type=int, default=8)
     args = parser.parse_args()
     generate(args.num_samples, args.output_dir, args.model, args.workers)

@@ -18,12 +18,26 @@ def selective_log_softmax(logits, targets):
     return log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
 
 
+def _unwrap_chat_template(text):
+    """Extract raw text from chat template dict format if present."""
+    # model may output: [{'type': 'text', 'text': '<think>...'}]
+    # we need to extract the inner text content
+    match = re.search(r"\[?\{['\"]type['\"]:\s*['\"]text['\"],\s*['\"]text['\"]:\s*['\"](.+)", text, re.DOTALL)
+    if match:
+        inner = match.group(1)
+        # unescape the string
+        inner = inner.replace("\\'", "'").replace('\\"', '"').replace("\\n", "\n")
+        # remove trailing dict/list closure
+        inner = re.sub(r"['\"]?\s*\}?\]?\s*$", "", inner)
+        return inner
+    return text
+
+
 def _render_candidate(text):
+    text = _unwrap_chat_template(text)
     code_match = re.search(r"<code>(.*?)</code>", text, re.DOTALL)
     if code_match:
-        tsx = code_match.group(1)
-        # fix escaped sequences from tokenizer decode
-        tsx = tsx.replace("\\n", "\n").replace("\\'", "'").replace('\\"', '"')
+        tsx = code_match.group(1).strip()
         try:
             return (render_tsx_to_image(tsx), tsx)
         except Exception:
@@ -81,7 +95,7 @@ def run_grpo(model, processor, screenshot_paths, ref_tsx_list=None, model_name="
             with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.bfloat16):
                 gen_out = model.generate(
                     **inputs, output_logits=True, return_dict_in_generate=True,
-                    temperature=0.7, do_sample=True, max_new_tokens=2048,
+                    temperature=0.7, do_sample=True, max_new_tokens=3072,
                     pad_token_id=PAD_TOKEN_ID, num_return_sequences=n
                 )
 
@@ -140,46 +154,53 @@ def run_grpo(model, processor, screenshot_paths, ref_tsx_list=None, model_name="
             old_logits = old_outputs.logits[:, :-1]
             old_targets = tokens[:, 1:]
             old_token_log_probs = selective_log_softmax(old_logits, old_targets)
+            del old_logits
+            del old_targets
+            torch.cuda.empty_cache() 
             old_probs_list = []
             for s in range(len(generations)):
                 pl = prompt_lengths[s]
                 old_probs_list.append(old_token_log_probs[s, pl-1:])
             old_probs = torch.nn.utils.rnn.pad_sequence(old_probs_list, batch_first=True, padding_value=0.0) # [batch, max_seq_len], this isnt about correctness its necessary for us to create the tensors of uniform length
 
-        with torch.no_grad():
+        with torch.no_grad(),  torch.amp.autocast("cuda", dtype=torch.bfloat16):
             model.set_adapter("reference")
             outputs_ref = model(tokens, attention_mask=attention_mask) # frozen SFT adapter for KL reference
+            ref_logits = outputs_ref.logits[:, :-1]
+            ref_outputs = tokens[:, 1:]
+            ref_token_log_probs = selective_log_softmax(ref_logits, ref_outputs)
+            del ref_logits
+            del ref_outputs
+            torch.cuda.empty_cache()
+            ref_probs = []
+            for s in range(len(generations)):
+                pl = prompt_lengths[s]
+                ref_probs.append(ref_token_log_probs[s, pl-1:])
+            ref_probs = torch.nn.utils.rnn.pad_sequence(ref_probs, batch_first=True, padding_value=0.0)
+            del outputs_ref, ref_token_log_probs
             model.set_adapter("default")
                     
         model.train()
+        targets = tokens[:, 1:]
         for _ in range(num_epochs):
             with torch.amp.autocast("cuda", dtype=torch.bfloat16):
                 outputs = model(tokens, attention_mask=attention_mask)
 
                 adv = torch.tensor(completion_scores, device=device).detach().unsqueeze(1) # (B*n, 1), broadcasts with (B*n, seq_len)
 
-                logits = outputs.logits[:, :-1] # batch, seq, vocab
-                logits_ref = outputs_ref.logits[:, :-1]
-                targets = tokens[:, 1:] # align logits and targets (logits predict next token)
-
+                logits = outputs.logits[:, :-1]
                 token_log_probs = selective_log_softmax(logits, targets)
-                token_log_probs_ref = selective_log_softmax(logits_ref, targets)
 
                 completion_log_probs = []
-                completion_log_probs_ref = []
-
                 for s in range(len(generations)):
                     pl = prompt_lengths[s]
-                    completion_log_probs.append(token_log_probs[s, pl-1:]) # get rid of prompt
-                    completion_log_probs_ref.append(token_log_probs_ref[s, pl-1:])
-
+                    completion_log_probs.append(token_log_probs[s, pl-1:])
                 completion_log_probs = torch.nn.utils.rnn.pad_sequence(completion_log_probs, batch_first=True, padding_value=0.0)
-                completion_log_probs_ref = torch.nn.utils.rnn.pad_sequence(completion_log_probs_ref, batch_first=True, padding_value=0.0)
 
                 # align shapes and build mask
-                seq_len = min(completion_log_probs.shape[1], old_probs.shape[1])
+                seq_len = min(completion_log_probs.shape[1], old_probs.shape[1], ref_probs.shape[1])
                 completion_log_probs = completion_log_probs[:, :seq_len]
-                completion_log_probs_ref = completion_log_probs_ref[:, :seq_len]
+                completion_log_probs_ref = ref_probs[:, :seq_len]
                 old_probs_aligned = old_probs[:, :seq_len]
                 comp_lens = torch.tensor(completion_lengths, device=device)
                 seq_indices = torch.arange(seq_len, device=device).unsqueeze(0) # double broadcast this line and next
@@ -194,7 +215,7 @@ def run_grpo(model, processor, screenshot_paths, ref_tsx_list=None, model_name="
 
                 ratio = torch.exp(completion_log_probs - old_probs_aligned)
                 clipped = torch.clamp(ratio, 1 - eps, 1 + eps)
-                # clip fraction: how often the ratio was clipped — if too high, policy is changing too fast
+                # clip fraction: how often the ratio was clipped if too high, policy is changing too fast
                 clip_frac = ((ratio - 1).abs() > eps).float().mean().item()
                 per_token_loss = -torch.min(adv * ratio, adv * clipped) + beta * KL
                 loss = ((per_token_loss * mask).sum(dim=-1) / mask.sum(dim=-1).clamp(min=1)).mean() # average per token across sequences

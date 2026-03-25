@@ -1,9 +1,11 @@
 """
+Extract training data from the HuggingFace widget2code-benchmark train split.
 
-reverse-engineer self-contained HTML/CSS using a SOTA LLM.
+Uses local git-cloned images at data/widget2code-benchmark/train/*.png,
+sends each to GPT-5.3 to reverse-engineer React+Tailwind TSX.
+
 Usage:
-    python -m data.collection.collect_widget_factory --num_samples 50000 --output_dir ./data/raw
-    python -m data.collection.collect_widget_factory --num_samples 100 --output_dir ./data/raw  # test run
+    python -m data.collection.collect_hf_extraction --num_samples 1820 --output_dir ./output/raw --workers 8
 """
 import json
 import os
@@ -19,7 +21,7 @@ load_dotenv()
 
 client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
-WIDGET2CODE_DATA_DIR = "/shared/houston/widget2code/widget2code-sft/widget-factory-sft-models/50000-allicons-qwen3-max-all"
+HF_TRAIN_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "data", "widget2code-benchmark", "train")
 
 SYSTEM_PROMPT = (
     "You are an expert frontend developer. Given a screenshot of a UI widget, "
@@ -51,22 +53,6 @@ def strip_code_fences(code: str) -> str:
     return code.strip()
 
 
-def load_widget_paths(data_dir: str, num_samples: int = None) -> list[dict]:
-    widget_dirs = sorted(glob.glob(os.path.join(data_dir, "widget-*")))
-    samples = []
-    for d in widget_dirs:
-        screenshot = os.path.join(d, "6-output.png")
-        if os.path.exists(screenshot):
-            samples.append({
-                "widget_id": os.path.basename(d),
-                "screenshot_path": screenshot,
-            })
-    if num_samples and num_samples < len(samples):
-        random.seed(42)
-        samples = random.sample(samples, num_samples)
-    return samples
-
-
 def generate_tsx_from_image(image_path: str, model: str = "gemini-3-flash-preview") -> str:
     with open(image_path, "rb") as f:
         img_bytes = f.read()
@@ -86,25 +72,24 @@ def generate_tsx_from_image(image_path: str, model: str = "gemini-3-flash-previe
     return strip_code_fences(code)
 
 
-def process_one(sample: dict, output_dir: str, model: str = "gemini-3-flash-preview") -> dict | None:
-    widget_id = sample["widget_id"]
-    screenshot_path = sample["screenshot_path"]
+def process_one(image_path: str, output_dir: str, model: str = "gemini-3-flash-preview") -> dict | None:
+    basename = os.path.splitext(os.path.basename(image_path))[0]
+    widget_id = f"hf-{basename}"
     output_path = os.path.join(output_dir, f"{widget_id}.json")
 
-    # skip if already processed (for resumability)
     if os.path.exists(output_path):
         return None
 
     try:
-        tsx = generate_tsx_from_image(screenshot_path, model=model)
+        tsx = generate_tsx_from_image(image_path, model=model)
 
-        # basic sanity: must contain export default
         if "export default" not in tsx:
+            print(f"  Bad output for {widget_id}, skipping")
             return None
 
         result = {
             "widget_id": widget_id,
-            "screenshot_path": screenshot_path,
+            "screenshot_path": os.path.abspath(image_path),
             "tsx": tsx,
         }
 
@@ -117,43 +102,52 @@ def process_one(sample: dict, output_dir: str, model: str = "gemini-3-flash-prev
         return None
 
 
-def collect(num_samples: int, output_dir: str, model: str = "gemini-3-flash-preview", workers: int = 8):
+def extract(num_samples: int, output_dir: str, model: str = "gemini-3-flash-preview", workers: int = 8):
     os.makedirs(output_dir, exist_ok=True)
 
-    print(f"Loading widget screenshots from {WIDGET2CODE_DATA_DIR}...")
-    samples = load_widget_paths(WIDGET2CODE_DATA_DIR, num_samples)
-    print(f"Found {len(samples)} widgets to process")
+    hf_dir = os.path.abspath(HF_TRAIN_DIR)
+    all_images = sorted(glob.glob(os.path.join(hf_dir, "*.png")))
+    print(f"Found {len(all_images)} images in {hf_dir}")
 
-    # count already done
-    already_done = len(glob.glob(os.path.join(output_dir, "widget-*.json")))
-    print(f"Already processed: {already_done}, remaining: {len(samples) - already_done}")
+    if not all_images:
+        print("No images found. Clone the dataset first:")
+        print("  git clone https://huggingface.co/datasets/Djanghao/widget2code-benchmark data/widget2code-benchmark")
+        return
+
+    if num_samples < len(all_images):
+        random.seed(42)
+        all_images = random.sample(all_images, num_samples)
+
+    already_done = len([f for f in os.listdir(output_dir) if f.startswith("hf-") and f.endswith(".json")])
+    print(f"Already processed: {already_done}, total to process: {len(all_images)}")
 
     succeeded = already_done
     failed = 0
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(process_one, s, output_dir, model): s for s in samples}
+        futures = {pool.submit(process_one, img, output_dir, model): img for img in all_images}
         for i, future in enumerate(as_completed(futures)):
             result = future.result()
             if result is not None:
                 succeeded += 1
             else:
-                # could be skipped (already done) or failed
-                if not os.path.exists(os.path.join(output_dir, f"{futures[future]['widget_id']}.json")):
+                img = futures[future]
+                basename = os.path.splitext(os.path.basename(img))[0]
+                widget_id = f"hf-{basename}"
+                if not os.path.exists(os.path.join(output_dir, f"{widget_id}.json")):
                     failed += 1
 
             if (i + 1) % 50 == 0:
-                print(f"  Progress: {i+1}/{len(samples)} | succeeded: {succeeded} | failed: {failed}")
+                print(f"  Progress: {i+1}/{len(all_images)} | succeeded: {succeeded} | failed: {failed}")
 
     print(f"\nDone! {succeeded} succeeded, {failed} failed")
-    print(f"Raw data saved to {output_dir}/")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--num_samples", type=int, default=50000)
-    parser.add_argument("--output_dir", type=str, default="./data/raw")
+    parser.add_argument("--num_samples", type=int, default=1820)
+    parser.add_argument("--output_dir", type=str, default="./output/raw")
     parser.add_argument("--model", type=str, default="gemini-3-flash-preview")
     parser.add_argument("--workers", type=int, default=8)
     args = parser.parse_args()
-    collect(args.num_samples, args.output_dir, args.model, args.workers)
+    extract(args.num_samples, args.output_dir, args.model, args.workers)

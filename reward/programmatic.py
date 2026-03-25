@@ -25,6 +25,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 _RENDER_DIR = Path(__file__).resolve().parent.parent / "render"
 _NODE_MODULES = _RENDER_DIR / "node_modules"
 _TEMPLATE_HTML = _RENDER_DIR / "template.html"
+_TAILWIND_JS = _RENDER_DIR / "tailwind.js"
 _ESBUILD_BIN = _NODE_MODULES / ".bin" / "esbuild"
 
 def _get_browser():
@@ -74,8 +75,10 @@ def render_tsx_to_image(tsx_code: str, width=800, height=600) -> bytes:
         if result.returncode != 0:
             raise RuntimeError(f"esbuild failed:\n{result.stderr}")
 
-        # copy the HTML template
+        # copy the HTML template and local tailwind.js
         shutil.copy2(str(_TEMPLATE_HTML), os.path.join(tmp_dir, "index.html"))
+        if _TAILWIND_JS.exists():
+            shutil.copy2(str(_TAILWIND_JS), os.path.join(tmp_dir, "tailwind.js"))
 
         # render with Playwright
         browser = _get_browser()
@@ -234,6 +237,8 @@ def _extract_bounding_boxes(tsx_code: str, width=800, height=600) -> list[dict]:
             return []
 
         shutil.copy2(str(_TEMPLATE_HTML), os.path.join(tmp_dir, "index.html"))
+        if _TAILWIND_JS.exists():
+            shutil.copy2(str(_TAILWIND_JS), os.path.join(tmp_dir, "tailwind.js"))
 
         browser = _get_browser()
         page = browser.new_page(viewport={"width": width, "height": height})
@@ -317,7 +322,7 @@ def compute_reward_code(target_image: bytes, generated_tsx: str, rendered_image:
     except Exception as e:
         import sys
         print(f"[reward] metric computation failed: {e}", file=sys.stderr)
-        return 0.0
+        raise  # let callers decide how to handle failures
 
     if ref_tsx is not None:
         return (0.15 * ssim_score +
