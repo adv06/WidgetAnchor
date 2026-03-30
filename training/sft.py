@@ -19,7 +19,7 @@ SYSTEM_PROMPT = (
     "- Colors: use exact hex values via arbitrary-value syntax (e.g. `bg-[#3B82F6]`, `text-[#1F2937]`)\n"
     "- Match layout exactly: flex/grid direction, alignment, spacing, gaps, padding, margins\n"
     "- Match typography: text size, font weight, tracking, leading\n"
-    "- Match border-radius, shadow, opacity, gradients\n"
+    "- Match border-radius, sno thadow, opacity, gradients\n"
     "- Charts/gauges/progress: use recharts (import from 'recharts')\n"
     "- Icons: use lucide-react (import from 'lucide-react')\n"
     "- The root container must match the widget dimensions given in the user message\n"
@@ -62,7 +62,8 @@ def selective_log_softmax(logits, targets):
 ACCUM_STEPS = 4
 
 
-def run_sft(model, processor, samples, training_steps=1000, lr=1e-4, save_dir="/shared/advey", device=torch.device("cuda:0")):
+def run_sft(model, processor, samples, training_steps=1000, lr=1e-4, save_dir="/shared/advey",
+            plot_path="sft.png", device=torch.device("cuda:0")):
 
      #   - screenshot_path: path to widget screenshot
      #   - cot: target output (<think>...</think><code>...</code>)
@@ -117,7 +118,10 @@ def run_sft(model, processor, samples, training_steps=1000, lr=1e-4, save_dir="/
         loss_history.append(loss.item() * ACCUM_STEPS)  # log unscaled loss
 
         if (i+1) % 10 == 0:
-            print(f"SFT step {i+1}/{training_steps} | loss: {loss.item():.4f} | lr: {scheduler.get_last_lr()[0]:.6f}")
+            print(f"SFT step {i+1}/{training_steps} | loss: {loss.item() * ACCUM_STEPS:.4f} | lr: {scheduler.get_last_lr()[0]:.6f}")
+
+        if (i+1) % 100 == 0:
+            _save_plot(loss_history, i+1, training_steps, plot_path)
 
         if (i+1) % 200 == 0:
             ckpt_dir = f"{save_dir}/checkpoints/sft_step_{i+1}"
@@ -125,23 +129,22 @@ def run_sft(model, processor, samples, training_steps=1000, lr=1e-4, save_dir="/
             model.save_pretrained(ckpt_dir)
             print(f"SFT checkpoint saved at step {i+1}")
 
-    # save training curve
-    plot_dir = f"{save_dir}/plots"
-    os.makedirs(plot_dir, exist_ok=True)
+    _save_plot(loss_history, training_steps, training_steps, plot_path)
+    return model
+
+
+def _save_plot(loss_history, step, total_steps, plot_path):
     fig, ax = plt.subplots(figsize=(10, 5))
     ax.plot(loss_history, alpha=0.3, label="per-step")
-    # smoothed curve (rolling average)
     if len(loss_history) > 10:
-        window = min(20, len(loss_history) // 5)
-        smoothed = [sum(loss_history[max(0,i-window):i+1]) / len(loss_history[max(0,i-window):i+1]) for i in range(len(loss_history))]
+        window = min(50, len(loss_history) // 5)
+        smoothed = [sum(loss_history[max(0,j-window):j+1]) / len(loss_history[max(0,j-window):j+1]) for j in range(len(loss_history))]
         ax.plot(smoothed, label=f"smoothed (window={window})")
     ax.set_xlabel("Step")
     ax.set_ylabel("Loss")
-    ax.set_title("SFT Training Loss")
+    ax.set_title(f"SFT Training Loss (step {step}/{total_steps})")
     ax.legend()
     fig.tight_layout()
-    fig.savefig(f"{plot_dir}/sft_training.png", dpi=150)
+    fig.savefig(plot_path, dpi=150)
     plt.close(fig)
-    print(f"SFT training curve saved to {plot_dir}/sft_training.png")
-
-    return model
+    print(f"Plot saved to {plot_path}")

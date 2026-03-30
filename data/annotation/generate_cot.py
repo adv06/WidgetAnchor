@@ -90,8 +90,10 @@ COT_SYSTEM_PROMPT = (
     "### 2c. Style Tokens\n[...]\n"
     "### 2d. Field-to-Visual Binding\n[...]\n"
     "</think>\n"
-    "<code>\n[the ground-truth React component]\n</code>\n\n"
+    "<code>\nYOU MUST INCLUDE THE COMPLETE REACT COMPONENT CODE HERE — copy every line from the ground-truth code provided. DO NOT use a placeholder or summary.\n</code>\n\n"
     "IMPORTANT:\n"
+    "- The <code> block MUST contain the FULL ground-truth React component, copied verbatim. "
+    "NEVER write a placeholder like '[the ground-truth React component]'.\n"
     "- Semantic fields must use SEMANTIC ROLES (primary-metric, entity-label, trend-indicator), "
     "NOT component labels (title text, subtitle text, left icon).\n"
     "- Infer the INFORMATION STRUCTURE the widget communicates, not just its visual layout.\n"
@@ -212,6 +214,13 @@ def process_one(path: str, output_dir: str) -> dict | None:
         if not (think_open < think_close < code_open < code_close):
             print(f"  Bad format for {widget_id}: tags not properly nested, skipping")
             return None
+
+        # validate that <code> contains actual code, not a placeholder
+        code_content = cot_output[code_open + len("<code>"):code_close].strip()
+        if "import" not in code_content and "export default" not in code_content:
+            print(f"  Bad code for {widget_id}: placeholder detected, patching with original tsx")
+            # replace placeholder with the actual tsx from the sample
+            cot_output = cot_output[:code_open] + "<code>\n" + sample["tsx"] + "\n</code>" + cot_output[code_close + len("</code>"):]
 
         sample["cot"] = cot_output
 

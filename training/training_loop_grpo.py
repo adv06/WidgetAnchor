@@ -94,7 +94,7 @@ def run_grpo(model, processor, screenshot_paths, ref_tsx_list=None, model_name="
 
             with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.bfloat16):
                 gen_out = model.generate(
-                    **inputs, output_logits=True, return_dict_in_generate=True,
+                    **inputs, return_dict_in_generate=True,
                     temperature=0.7, do_sample=True, max_new_tokens=3072,
                     pad_token_id=PAD_TOKEN_ID, num_return_sequences=n
                 )
@@ -150,85 +150,82 @@ def run_grpo(model, processor, screenshot_paths, ref_tsx_list=None, model_name="
 
         # compute old_probs from a forward pass, since model.generate is a different path, KV cache rounds bf16, so doing a forward pass is better
         with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.bfloat16):
-            old_outputs = model(tokens, attention_mask=attention_mask)
-            old_logits = old_outputs.logits[:, :-1]
-            old_targets = tokens[:, 1:]
-            old_token_log_probs = selective_log_softmax(old_logits, old_targets)
-            del old_logits
-            del old_targets
-            torch.cuda.empty_cache() 
             old_probs_list = []
             for s in range(len(generations)):
+                old_output = model(tokens[s:s+1], attention_mask=attention_mask[s:s+1]) 
+                old_logits = old_output.logits[:, :-1]
+                old_targets = tokens[s:s+1, 1:]
+                old_token_log_probs = selective_log_softmax(old_logits, old_targets)
+                del old_logits
+                del old_targets
+                torch.cuda.empty_cache() 
                 pl = prompt_lengths[s]
-                old_probs_list.append(old_token_log_probs[s, pl-1:])
+                old_probs_list.append(old_token_log_probs[0, pl-1:])
             old_probs = torch.nn.utils.rnn.pad_sequence(old_probs_list, batch_first=True, padding_value=0.0) # [batch, max_seq_len], this isnt about correctness its necessary for us to create the tensors of uniform length
 
         with torch.no_grad(),  torch.amp.autocast("cuda", dtype=torch.bfloat16):
             model.set_adapter("reference")
-            outputs_ref = model(tokens, attention_mask=attention_mask) # frozen SFT adapter for KL reference
-            ref_logits = outputs_ref.logits[:, :-1]
-            ref_outputs = tokens[:, 1:]
-            ref_token_log_probs = selective_log_softmax(ref_logits, ref_outputs)
-            del ref_logits
-            del ref_outputs
-            torch.cuda.empty_cache()
             ref_probs = []
             for s in range(len(generations)):
+                output_ref = model(tokens[s:s+1], attention_mask=attention_mask[s:s+1]) # frozen SFT adapter for KL reference
+                ref_logits = output_ref.logits[:, :-1]
+                ref_outputs = tokens[s:s+1, 1:]
+                ref_token_log_probs = selective_log_softmax(ref_logits, ref_outputs)
+                del ref_logits
+                del ref_outputs
                 pl = prompt_lengths[s]
-                ref_probs.append(ref_token_log_probs[s, pl-1:])
+                ref_probs.append(ref_token_log_probs[0, pl-1:])
             ref_probs = torch.nn.utils.rnn.pad_sequence(ref_probs, batch_first=True, padding_value=0.0)
-            del outputs_ref, ref_token_log_probs
             model.set_adapter("default")
                     
         model.train()
         targets = tokens[:, 1:]
         for _ in range(num_epochs):
-            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-                outputs = model(tokens, attention_mask=attention_mask)
+            optimizer.zero_grad()
+            for s in range(len(generations)):
+                with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                    outputs = model(tokens[s:s+1], attention_mask=attention_mask[s:s+1])
 
-                adv = torch.tensor(completion_scores, device=device).detach().unsqueeze(1) # (B*n, 1), broadcasts with (B*n, seq_len)
+                    adv = torch.tensor(completion_scores[s], device=device).detach() # (B*n, 1), broadcasts with (B*n, seq_len) --> not anymore due to OOM
 
-                logits = outputs.logits[:, :-1]
-                token_log_probs = selective_log_softmax(logits, targets)
+                    logits = outputs.logits[:, :-1]
+                    token_log_probs = selective_log_softmax(logits, targets[s:s+1])
 
-                completion_log_probs = []
-                for s in range(len(generations)):
                     pl = prompt_lengths[s]
-                    completion_log_probs.append(token_log_probs[s, pl-1:])
-                completion_log_probs = torch.nn.utils.rnn.pad_sequence(completion_log_probs, batch_first=True, padding_value=0.0)
-
-                # align shapes and build mask
-                seq_len = min(completion_log_probs.shape[1], old_probs.shape[1], ref_probs.shape[1])
-                completion_log_probs = completion_log_probs[:, :seq_len]
-                completion_log_probs_ref = ref_probs[:, :seq_len]
-                old_probs_aligned = old_probs[:, :seq_len]
-                comp_lens = torch.tensor(completion_lengths, device=device)
-                seq_indices = torch.arange(seq_len, device=device).unsqueeze(0) # double broadcast this line and next
-                mask = (seq_indices < comp_lens.unsqueeze(1)).float() # only takes into account [completion + padding] vs [prompt + completion + padding]
+                    completion_log_probs = token_log_probs[0, pl-1:]
                 
-                # Just a note, we could have done the following above not vectorized
-                # for i, comp in enumerate(completion_lengths):
-                #     mask[i, :comp] = 1  
+                    # align shapes and build mask
+                    seq_len = min(completion_log_probs.shape[0], old_probs.shape[1], ref_probs.shape[1])
+                    completion_log_probs = completion_log_probs[:seq_len]
+                    completion_log_probs_ref = ref_probs[s, :seq_len]
+                    old_probs_aligned = old_probs[s, :seq_len]
+                    comp_lens = torch.tensor(completion_lengths[s], device=device)
+                    seq_indices = torch.arange(seq_len, device=device) # double broadcast this line and next
+                    mask = (seq_indices < comp_lens).float() # only takes into account [completion + padding] vs [prompt + completion + padding]
+                    
+                    # Just a note, we could have done the following above not vectorized
+                    # for i, comp in enumerate(completion_lengths):
+                    #     mask[i, :comp] = 1  
 
-                log_ratio = completion_log_probs_ref - completion_log_probs # KL divergence
-                KL = torch.exp(log_ratio) - log_ratio - 1 # schulman approximation, always non negative as opposed to the log_ratio
+                    log_ratio = completion_log_probs_ref - completion_log_probs # KL divergence
+                    KL = torch.exp(log_ratio) - log_ratio - 1 # schulman approximation, always non negative as opposed to the log_ratio
 
-                ratio = torch.exp(completion_log_probs - old_probs_aligned)
-                clipped = torch.clamp(ratio, 1 - eps, 1 + eps)
-                # clip fraction: how often the ratio was clipped if too high, policy is changing too fast
-                clip_frac = ((ratio - 1).abs() > eps).float().mean().item()
-                per_token_loss = -torch.min(adv * ratio, adv * clipped) + beta * KL
-                loss = ((per_token_loss * mask).sum(dim=-1) / mask.sum(dim=-1).clamp(min=1)).mean() # average per token across sequences
-            loss.backward()
+                    ratio = torch.exp(completion_log_probs - old_probs_aligned)
+                    clipped = torch.clamp(ratio, 1 - eps, 1 + eps)
+                    # clip fraction: how often the ratio was clipped if too high, policy is changing too fast
+                    clip_frac = ((ratio - 1).abs() > eps).float().mean().item()
+                    per_token_loss = -torch.min(adv * ratio, adv * clipped) + beta * KL
+                    loss = ((per_token_loss * mask).sum() / mask.sum().clamp(min=1)) # average per token across sequences
+                loss /= (len(generations)) # gradient accumulation
+                loss.backward() 
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
-            optimizer.zero_grad()
             scheduler.step()
 
         # track metrics
-        history["loss"].append(loss.item()) # unscaled loss
+        history["loss"].append(loss.item() * len(generations)) # unscaled loss
         history["reward"].append(torch.tensor(raw_scores).mean().item())
-        history["kl"].append(KL.mean().item())
+        history["kl"].append((KL * mask).sum().item() / mask.sum().clamp(min=1).item())
         history["clip_frac"].append(clip_frac)
 
         if (i+1) % 10 == 0:

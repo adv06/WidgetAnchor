@@ -22,7 +22,7 @@ def load_model(checkpoint_path: str, model_name: str = MODEL_NAME, device: str =
     return model, processor
 
 
-def generate(model, processor, image_path: str, temperature: float = 0.7, max_new_tokens: int = 3072) -> str:
+def generate(model, processor, image_path: str, temperature: float = 0.7, max_new_tokens: int = 8192) -> str:
     messages = [
         {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT}]},
         {"role": "user", "content": _user_message(image_path)},
@@ -44,22 +44,37 @@ def generate(model, processor, image_path: str, temperature: float = 0.7, max_ne
 
 def _unwrap_chat_template(text: str) -> str:
     """Extract raw text from chat template dict format if present."""
-    match = re.search(r"\[?\{['\"]type['\"]:\s*['\"]text['\"],\s*['\"]text['\"]:\s*['\"](.+)", text, re.DOTALL)
-    if match:
-        inner = match.group(1)
-        inner = inner.replace("\\'", "'").replace('\\"', '"').replace("\\n", "\n")
-        inner = re.sub(r"['\"]?\s*\}?\]?\s*$", "", inner)
-        return inner
+    # model sometimes outputs the chat template wrapper: [{'type': 'text', 'text': '...'}]
+    # with escaped newlines (\\n) and quotes (\')
+    if text.lstrip().startswith("[{") or text.lstrip().startswith("{'"):
+        match = re.search(r"['\"]text['\"]:\s*['\"](.+)", text, re.DOTALL)
+        if match:
+            inner = match.group(1)
+            # strip trailing wrapper
+            inner = re.sub(r"['\"]?\s*\}?\]?\s*$", "", inner)
+            # unescape
+            inner = inner.replace("\\'", "'").replace('\\"', '"').replace("\\n", "\n").replace("\\t", "\t")
+            return inner
     return text
 
 
 def extract_code(text: str) -> str | None:
     text = _unwrap_chat_template(text)
+    # try standard tags first
     match = re.search(r"<code>(.*?)</code>", text, re.DOTALL)
-    if match is None:
-        return None
-    code = match.group(1).strip()
-    return code
+    if match:
+        return match.group(1).strip()
+    # fallback: unclosed <code> tag (model hit token limit before closing)
+    match = re.search(r"<code>(.*)", text, re.DOTALL)
+    if match:
+        code = match.group(1).strip()
+        if "export default" in code or "import" in code:
+            return code
+    # fallback: try markdown code fences
+    match = re.search(r"```(?:tsx|jsx|javascript|react)?\s*\n(.*?)```", text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return None
 
 
 if __name__ == "__main__":

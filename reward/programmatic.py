@@ -289,21 +289,96 @@ def compute_layout_score(ref_tsx: str, gen_tsx: str, width=800, height=600) -> f
     return IoU[rows, cols].mean()
 
     
+def _get_wf_metrics():
+    """Lazy-load widget2code evaluation metrics."""
+    import sys
+    if "/home/advey/widget-factory/tools/evaluation" not in sys.path:
+        sys.path.insert(0, "/home/advey/widget-factory/tools/evaluation")
+    from widget_quality.layout import compute_layout
+    from widget_quality.legibility import compute_legibility
+    from widget_quality.perceptual import compute_perceptual
+    from widget_quality.style import compute_style
+    from widget_quality.geometry import compute_aspect_dimensionality_fidelity
+    from widget_quality.composite import (
+        handling_layout, handling_legibility, handling_style, handling_perceptual
+    )
+    return {
+        "compute_layout": compute_layout,
+        "compute_legibility": compute_legibility,
+        "compute_perceptual": compute_perceptual,
+        "compute_style": compute_style,
+        "compute_geo": compute_aspect_dimensionality_fidelity,
+        "handling_layout": handling_layout,
+        "handling_legibility": handling_legibility,
+        "handling_style": handling_style,
+        "handling_perceptual": handling_perceptual,
+    }
+
+
+_wf_metrics = None
+
+
+def compute_reward_wf(target_image: bytes, rendered_image: bytes) -> float:
+    """Compute reward using widget2code evaluation metrics. Returns [0, 1]."""
+    global _wf_metrics
+    if _wf_metrics is None:
+        _wf_metrics = _get_wf_metrics()
+
+    from PIL import Image as PILImage
+    ref_img = np.array(PILImage.open(io.BytesIO(target_image)).convert("RGB"))
+    gen_img = np.array(PILImage.open(io.BytesIO(rendered_image)).convert("RGB"))
+
+    h = min(ref_img.shape[0], gen_img.shape[0])
+    w = min(ref_img.shape[1], gen_img.shape[1])
+    ref_img = np.array(PILImage.fromarray(ref_img).resize((w, h)))
+    gen_img = np.array(PILImage.fromarray(gen_img).resize((w, h)))
+
+    geo = _wf_metrics["compute_geo"](ref_img, gen_img)
+    layout = _wf_metrics["compute_layout"](ref_img, gen_img)
+    legibility = _wf_metrics["compute_legibility"](ref_img, gen_img)
+    perceptual = _wf_metrics["compute_perceptual"](ref_img, gen_img)
+    style = _wf_metrics["compute_style"](ref_img, gen_img)
+
+    ls = _wf_metrics["handling_layout"](layout)
+    leg = _wf_metrics["handling_legibility"](legibility)
+    st = _wf_metrics["handling_style"](style)
+    ps = _wf_metrics["handling_perceptual"](perceptual)
+    gs = 100 * np.clip(geo, 0, 1)
+
+    # Weighted combination matching widget2code benchmark emphasis
+    score = (
+        0.08 * ls["MarginAsymmetry"] +
+        0.08 * ls["ContentAspectDiff"] +
+        0.04 * ls["AreaRatioDiff"] +
+        0.15 * leg["TextJaccard"] +
+        0.05 * leg["ContrastDiff"] +
+        0.05 * leg["ContrastLocalDiff"] +
+        0.10 * st["PaletteDistance"] +
+        0.05 * st["Vibrancy"] +
+        0.05 * st["PolarityConsistency"] +
+        0.10 * (ps["ssim"] * 100) +
+        0.10 * ((1 - ps["lp"]) * 100) +
+        0.10 * gs +
+        0.05 * 100  # render success bonus
+    ) / 100.0
+
+    return float(np.clip(score, 0, 1))
+
+
 def compute_reward_code(target_image: bytes, generated_tsx: str, rendered_image: bytes = None,
                         ref_tsx: str = None) -> float:
+    # render if needed — let render failures propagate so callers can handle them
+    if rendered_image is None:
+        rendered_image = render_tsx_to_image(generated_tsx)
+
+    # --- simple metrics (fast, stable baseline signal) ---
     ssim_score = 0.0
     lpips_score = 0.0
     palette_score = 0.0
     contrast_score = 0.0
     polarity_score = 0.0
-    layout_score = 0.0
-
-    # render if needed — let render failures propagate so callers can handle them
-    if rendered_image is None:
-        rendered_image = render_tsx_to_image(generated_tsx)
 
     try:
-        # decode both images to numpy for functions that need arrays
         ref_np = cv2.imdecode(np.frombuffer(target_image, dtype=np.uint8), cv2.IMREAD_COLOR)
         gen_np = cv2.imdecode(np.frombuffer(rendered_image, dtype=np.uint8), cv2.IMREAD_COLOR)
         h = min(ref_np.shape[0], gen_np.shape[0])
@@ -316,24 +391,24 @@ def compute_reward_code(target_image: bytes, generated_tsx: str, rendered_image:
         palette_score = compute_palette_distance(ref_np, gen_np)
         contrast_score = compute_contrast_score(target_image, rendered_image)
         polarity_score = compute_polarity(ref_np, gen_np)
-
-        if ref_tsx is not None:
-            layout_score = compute_layout_score(ref_tsx, generated_tsx)
     except Exception as e:
         import sys
-        print(f"[reward] metric computation failed: {e}", file=sys.stderr)
-        raise  # let callers decide how to handle failures
+        print(f"[reward] simple metrics failed: {e}", file=sys.stderr)
 
-    if ref_tsx is not None:
-        return (0.15 * ssim_score +
-                0.15 * lpips_score +
-                0.20 * palette_score +
-                0.15 * contrast_score +
-                0.15 * polarity_score +
-                0.20 * layout_score)
-    else:
-        return (0.20 * ssim_score +
-                0.20 * lpips_score +
-                0.25 * palette_score +
-                0.20 * contrast_score +
-                0.15 * polarity_score)
+    simple_score = (0.20 * ssim_score +
+                    0.20 * lpips_score +
+                    0.25 * palette_score +
+                    0.20 * contrast_score +
+                    0.15 * polarity_score)
+
+    # --- wf metrics (benchmark-aligned, covers layout/text/geometry that simple metrics miss) ---
+    wf_score = 0.0
+    try:
+        wf_score = compute_reward_wf(target_image, rendered_image)
+    except Exception as e:
+        import sys
+        print(f"[reward] wf metrics failed, using simple only: {e}", file=sys.stderr)
+        return simple_score
+
+    # 70% wf (what the benchmark scores) + 30% simple (stable gradient signal)
+    return 0.7 * wf_score + 0.3 * simple_score
